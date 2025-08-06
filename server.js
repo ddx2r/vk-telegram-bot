@@ -370,7 +370,17 @@ function getObjectTypeDisplayName(type) {
 // Helper to construct VK object links for likes
 function getObjectLinkForLike(likeObject) {
     const { object_type, owner_id, object_id, post_id } = likeObject;
-    if (!owner_id || !object_id) return null;
+
+    // Внимание: Здесь мы добавили логирование, чтобы помочь отладить проблему
+    if (!owner_id) {
+        console.warn(`[${new Date().toISOString()}] Внимание: owner_id отсутствует для события 'like' (тип объекта: ${object_type}, ID объекта: ${object_id}). Ссылка не может быть сформирована.`);
+        return null;
+    }
+    
+    if (!object_id) {
+        console.warn(`[${new Date().toISOString()}] Внимание: object_id отсутствует для события 'like' (тип объекта: ${object_type}). Ссылка не может быть сформирована.`);
+        return null;
+    }
 
     switch (object_type) {
         case 'post': return `https://vk.com/wall${owner_id}_${object_id}`;
@@ -418,7 +428,7 @@ bot.onText(/\/help/, async (msg) => {
 /list_events - Показать список событий VK и их статус (вкл/выкл).
 /toggle_event <тип_события> - Включить/отключить уведомления для конкретного типа события.
     _Пример: /toggle_event message_new_
-    _Внимание: Настройки событий не сохраняются после перезапуска бота на Railway!_
+    _Внимание: Настройки событий не сохраняются после перезапуска бота!_
 `;
     await sendTelegramMessageWithRetry(chatId, helpMessage, { parse_mode: 'Markdown' });
 });
