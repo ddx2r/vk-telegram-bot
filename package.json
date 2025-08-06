@@ -1,19 +1,23 @@
 {
   "name": "vk-telegram-bot",
   "version": "1.0.0",
-  "description": "VK to Telegram Bot",
+  "description": "Бот для пересылки событий VK Callback API в Telegram",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords":,
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "vk",
+    "telegram",
+    "bot",
+    "callback-api",
+    "webhook"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {
-    "express": "^4.19.2",
+    "axios": "^1.7.2",
     "body-parser": "^1.20.2",
-    "node-telegram-bot-api": "^0.66.0",
-    "node-cache": "^5.1.2",
-    "crypto": "^1.0.1"
+    "express": "^4.19.2"
   }
 }
