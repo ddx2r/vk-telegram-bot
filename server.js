@@ -6,6 +6,7 @@ const bodyParser = require('body-parser'); // Для парсинга JSON-за�
 const axios = require('axios'); // Для выполнения HTTP-запросов (к Telegram API и VK API)
 const crypto = require('crypto'); // Для хеширования, используется для дедупликации
 const NodeCache = require('node-cache'); // Для in-memory кэша дедупликации
+const TelegramBot = require('node-telegram-bot-api'); // Для работы с Telegram Bot API
 
 // Инициализация Express приложения
 const app = express();
@@ -18,7 +19,7 @@ const VK_GROUP_ID = process.env.VK_GROUP_ID;
 const VK_SECRET_KEY = process.env.VK_SECRET_KEY;
 const VK_API_TOKEN = process.env.VK_API_TOKEN; // Добавлен VK API Token
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // Основной чат для пересылки событий
 
 // Проверка наличия всех необходимых переменных окружения
 if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_API_TOKEN || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -26,9 +27,50 @@ if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_API_TOKEN || !TELEGRAM_BOT_TOKEN || !T
     process.exit(1); // Завершаем процесс, если переменные не установлены
 }
 
+// Инициализация Telegram бота
+// Внимание: для работы команд бота, он должен быть добавлен в чат и иметь доступ к сообщениям.
+// Если бот должен отвечать на команды в приватном чате, TELEGRAM_CHAT_ID должен быть ID этого приватного чата.
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true }); // Включаем polling для приема команд
+
 // Инициализация кэша для дедупликации (TTL 60 секунд)
-// Это предотвращает отправку дублирующихся сообщений в Telegram в течение 60 секунд
+// Внимание: Этот кэш является in-memory и будет сброшен при каждом перезапуске контейнера на Railway.
 const deduplicationCache = new NodeCache({ stdTTL: 60, checkperiod: 120 });
+
+// Временное хранилище для настроек событий (не сохраняется при перезапусках Railway)
+const eventToggleState = {
+    'message_new': true,
+    'wall_post_new': true,
+    'wall_repost': true,
+    'wall_reply_new': true,
+    'wall_reply_edit': true,
+    'wall_reply_delete': true,
+    'board_post_new': true,
+    'board_post_edit': true,
+    'board_post_delete': true,
+    'photo_new': true,
+    'photo_comment_new': true,
+    'photo_comment_edit': true,
+    'photo_comment_delete': true,
+    'video_new': true,
+    'video_comment_new': true,
+    'video_comment_edit': true,
+    'video_comment_delete': true,
+    'audio_new': true,
+    'market_order_new': true,
+    'market_comment_new': true,
+    'market_comment_edit': true,
+    'market_comment_delete': true,
+    'poll_vote_new': true,
+    'group_join': true,
+    'group_leave': true,
+    'group_change_photo': true,
+    'group_change_settings': true,
+    'group_officers_edit': true,
+    'user_block': true,
+    'user_unblock': true,
+    'like_add': true,
+    'like_remove': true,
+};
 
 // Вспомогательная функция для экранирования HTML-сущностей
 function escapeHtml(text) {
@@ -63,14 +105,9 @@ async function getVkUserName(userId) {
         return null; // Возвращаем null, если имя не найдено
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Ошибка при получении имени пользователя VK (ID: ${userId}):`, error.response ? error.response.data : error.message);
-        // Отправляем сообщение об ошибке в Telegram
+        // Отправляем сообщение об ошибке в Telegram (в основной чат)
         try {
-            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                chat_id: TELEGRAM_CHAT_ID,
-                text: `⚠️ Ошибка при получении имени пользователя VK (ID: ${userId}): ${escapeHtml(error.message || 'Неизвестная ошибка')}. Событие будет отправлено с ID.`,
-                parse_mode: 'HTML',
-                timeout: 5000 // Таймаут 5 секунд для отправки уведомления об ошибке
-            });
+            await bot.sendMessage(TELEGRAM_CHAT_ID, `⚠️ Ошибка при получении имени пользователя VK (ID: ${userId}): ${escapeHtml(error.message || 'Неизвестная ошибка')}. Событие будет отправлено с ID.`, { parse_mode: 'HTML', disable_web_page_preview: true });
         } catch (telegramError) {
             console.error(`[${new Date().toISOString()}] Ошибка при отправке уведомления об ошибке в Telegram:`, telegramError.message);
         }
@@ -78,7 +115,170 @@ async function getVkUserName(userId) {
     }
 }
 
-// Обработчик POST-запросов от VK Callback API
+// Функция для отправки сообщения в Telegram с логикой повтора
+async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
+    let sent = false;
+    for (let i = 0; i < 3; i++) { // Повторить до 3 раз
+        try {
+            await bot.sendMessage(chatId, text, { ...options, disable_web_page_preview: true });
+            sent = true;
+            break;
+        } catch (telegramSendError) {
+            console.error(`[${new Date().toISOString()}] Ошибка при отправке сообщения в Telegram (попытка ${i + 1}):`, telegramSendError.response ? telegramSendError.response.data : telegramSendError.message);
+            if (i < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Экспоненциальная задержка
+        }
+    }
+    if (!sent) {
+        console.error(`[${new Date().toISOString()}] Не удалось отправить сообщение в Telegram после нескольких попыток.`);
+        // Можно отправить критическое уведомление, но чтобы не спамить, ограничимся логом.
+    }
+}
+
+// Функция для обработки вложений (фото, видео, аудио, документы)
+function getAttachmentsInfo(attachments, contextUrl = '') {
+    let attachmentsText = '';
+    if (!attachments || attachments.length === 0) {
+        return attachmentsText;
+    }
+
+    attachmentsText += '\n\n<b>Вложения:</b>\n';
+    attachments.forEach(attach => {
+        switch (attach.type) {
+            case 'photo':
+                const photo = attach.photo;
+                const photoUrl = photo.sizes?.find(s => s.type === 'x')?.url || photo.sizes?.[photo.sizes.length - 1]?.url;
+                if (photoUrl) {
+                    attachmentsText += `📸 <a href="${photoUrl}">Фото</a>`;
+                    if (photo.text) attachmentsText += ` <i>(${escapeHtml(photo.text)})</i>`;
+                    attachmentsText += '\n';
+                }
+                break;
+            case 'video':
+                const video = attach.video;
+                if (video.player) { // VK API предоставляет player URL для видео
+                    attachmentsText += `🎥 <a href="${video.player}">Видео: ${escapeHtml(video.title || 'Без названия')}</a>\n`;
+                } else if (video.owner_id && video.id) {
+                    attachmentsText += `🎥 <a href="https://vk.com/video${video.owner_id}_${video.id}">Видео: ${escapeHtml(video.title || 'Без названия')}</a>\n`;
+                }
+                break;
+            case 'audio':
+                const audio = attach.audio;
+                if (audio.url) { // VK API предоставляет прямой URL для аудио
+                    attachmentsText += `🎵 <a href="${audio.url}">Аудио: ${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}</a>\n`;
+                }
+                break;
+            case 'doc':
+                const doc = attach.doc;
+                if (doc.url) {
+                    attachmentsText += `📄 <a href="${doc.url}">Документ: ${escapeHtml(doc.title || 'Без названия')}</a>\n`;
+                }
+                break;
+            case 'link':
+                const link = attach.link;
+                if (link.url) {
+                    attachmentsText += `🔗 <a href="${link.url}">${escapeHtml(link.title || 'Ссылка')}</a>\n`;
+                }
+                break;
+            case 'poll':
+                const poll = attach.poll;
+                if (poll.id) {
+                    attachmentsText += `📊 Опрос: ${escapeHtml(poll.question || 'Без вопроса')}\n`;
+                }
+                break;
+            case 'wall': // Вложенный пост
+                const wallPost = attach.wall;
+                if (wallPost.owner_id && wallPost.id) {
+                    attachmentsText += `📝 Вложенный пост: <a href="https://vk.com/wall${wallPost.owner_id}_${wallPost.id}">Ссылка</a>\n`;
+                }
+                break;
+            default:
+                attachmentsText += `❓ Неизвестное вложение: ${attach.type}\n`;
+                break;
+        }
+    });
+    return attachmentsText;
+}
+
+
+// --- Обработчики команд Telegram ---
+
+bot.onText(/\/status/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== TELEGRAM_CHAT_ID) {
+        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в основном чате.');
+        return;
+    }
+    await sendTelegramMessageWithRetry(chatId, '✅ Бот активен и прослушивает события VK.');
+});
+
+bot.onText(/\/help/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== TELEGRAM_CHAT_ID) {
+        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в основном чате.');
+        return;
+    }
+    const helpMessage = `
+👋 *Доступные команды:*
+
+/status - Проверить статус бота.
+/help - Показать это сообщение.
+/my_chat_id - Узнать ID текущего чата.
+/test_notification - Отправить тестовое уведомление.
+/list_events - Показать список событий VK и их статус (вкл/выкл).
+/toggle_event <тип_события> - Включить/отключить уведомления для конкретного типа события.
+    _Пример: /toggle_event message_new_
+    _Внимание: Настройки событий не сохраняются после перезапуска бота на Railway!_
+`;
+    await sendTelegramMessageWithRetry(chatId, helpMessage, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/my_chat_id/, async (msg) => {
+    const chatId = msg.chat.id;
+    await sendTelegramMessageWithRetry(chatId, `ID этого чата: \`${chatId}\``, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/\/test_notification/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== TELEGRAM_CHAT_ID) {
+        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в основном чате.');
+        return;
+    }
+    await sendTelegramMessageWithRetry(chatId, '🔔 Тестовое уведомление от VK-Telegram бота успешно получено!');
+});
+
+bot.onText(/\/list_events/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== TELEGRAM_CHAT_ID) {
+        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в основном чате.');
+        return;
+    }
+    let eventList = '✨ *Статус уведомлений VK-событий:*\n\n';
+    for (const type in eventToggleState) {
+        eventList += `\`${type}\`: ${eventToggleState[type] ? '✅ Включено' : '❌ Отключено'}\n`;
+    }
+    eventList += '\n_Внимание: Настройки не сохраняются после перезапуска бота!_';
+    await sendTelegramMessageWithRetry(chatId, eventList, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/toggle_event (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== TELEGRAM_CHAT_ID) {
+        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в основном чате.');
+        return;
+    }
+    const eventType = match[1];
+    if (eventType in eventToggleState) {
+        eventToggleState[eventType] = !eventToggleState[eventType];
+        const status = eventToggleState[eventType] ? 'включены' : 'отключены';
+        await sendTelegramMessageWithRetry(chatId, `Уведомления для события \`${eventType}\` теперь ${status}.`);
+    } else {
+        await sendTelegramMessageWithRetry(chatId, `Неизвестный тип события: \`${eventType}\`. Используйте /list_events для просмотра доступных.`);
+    }
+});
+
+
+// --- Обработчик POST-запросов от VK Callback API ---
+
 app.post('/webhook', async (req, res) => { // Маршрут /webhook
     const { type, object, group_id, secret } = req.body;
 
@@ -96,15 +296,19 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
         return res.send('ok');
     }
 
-    // Исключаем нежелательные типы событий
+    // Исключаем нежелательные типы событий (typing_status, message_read)
     if (type === 'typing_status' || type === 'message_read') {
         console.log(`[${new Date().toISOString()}] Игнорируем событие типа: ${type}`);
         return res.send('ok');
     }
 
+    // Проверяем, включены ли уведомления для этого типа события
+    if (eventToggleState[type] === false) {
+        console.log(`[${new Date().toISOString()}] Уведомления для события типа ${type} отключены. Игнорируем.`);
+        return res.send('ok');
+    }
+
     // Логика дедупликации
-    // Создаем уникальный хеш для каждого события, чтобы избежать дублирования.
-    // Хеш включает тип события и его уникальный идентификатор.
     const objectId = object?.id || object?.message?.id || object?.post?.id || object?.photo?.id || object?.video?.id || object?.user_id || object?.comment?.id || object?.topic_id || object?.poll_id || object?.item_id || object?.officer_id || object?.admin_id;
     const eventHash = crypto.createHash('md5').update(JSON.stringify({ type, objectId })).digest('hex');
 
@@ -124,85 +328,121 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
         let userName = '';
         let authorDisplay = '';
         let ownerDisplay = '';
+        let attachmentsInfo = '';
 
         switch (type) {
             case 'message_new':
                 const message = object.message;
-                if (message && message.text) {
+                if (message) {
                     userName = await getVkUserName(message.from_id);
                     const senderDisplay = userName ? userName : `ID ${message.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(message.attachments, `https://vk.com/im?sel=${message.peer_id}&msgid=${message.id}`);
 
                     telegramMessage = `💬 <b>Новое сообщение в VK:</b>\n`;
                     telegramMessage += `<b>Отправитель:</b> <a href="https://vk.com/id${message.from_id}">${senderDisplay}</a>\n`;
-                    telegramMessage += `<b>Сообщение:</b> <i>${escapeHtml(message.text)}</i>`;
+                    if (message.text) {
+                        telegramMessage += `<b>Сообщение:</b> <i>${escapeHtml(message.text)}</i>`;
+                    } else {
+                        telegramMessage += `<b>Сообщение:</b> <i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено message_new без текста или объекта сообщения:`, object);
-                    telegramMessage = `💬 <b>Новое сообщение в VK:</b> (без текста или с некорректным объектом сообщения)`;
+                    console.warn(`[${new Date().toISOString()}] Получено message_new без объекта сообщения:`, object);
+                    telegramMessage = `💬 <b>Новое сообщение в VK:</b> (некорректный объект сообщения)`;
                 }
                 break;
 
             case 'wall_post_new':
                 const post = object.post;
-                if (post && post.text) {
+                if (post) {
                     userName = await getVkUserName(post.from_id);
                     authorDisplay = userName ? userName : `ID ${post.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(post.attachments, `https://vk.com/wall${post.owner_id}_${post.id}`);
 
                     telegramMessage = `📝 <b>Новый пост на стене VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${post.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/wall${post.owner_id}_${post.id}">Ссылка на пост</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(post.text)}</i>`;
+                    if (post.text) {
+                        telegramMessage += `<i>${escapeHtml(post.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено wall_post_new без текста или объекта поста:`, object);
-                    telegramMessage = `📝 <b>Новый пост на стене VK:</b> (без текста или с некорректным объектом поста)`;
+                    console.warn(`[${new Date().toISOString()}] Получено wall_post_new без объекта поста:`, object);
+                    telegramMessage = `📝 <b>Новый пост на стене VK:</b> (некорректный объект поста)`;
                 }
                 break;
 
-            case 'wall_repost': // Новый репост записи на стене
-                const repost = object.copy_history?.[0] || object.post;
-                if (repost && repost.text) {
-                    userName = await getVkUserName(object.owner_id); // Кто сделал репост
-                    authorDisplay = userName ? userName : `ID ${object.owner_id}`;
+            case 'wall_repost':
+                const repostObject = object.post; // Репост сам по себе является постом
+                const originalPost = repostObject?.copy_history?.[0]; // Оригинальный пост, если это репост
+                if (repostObject && originalPost) {
+                    userName = await getVkUserName(repostObject.from_id);
+                    authorDisplay = userName ? userName : `ID ${repostObject.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(originalPost.attachments, `https://vk.com/wall${originalPost.owner_id}_${originalPost.id}`);
+
                     telegramMessage = `🔁 <b>Новый репост в VK:</b>\n`;
-                    telegramMessage += `<b>Репостнул:</b> <a href="https://vk.com/id${object.owner_id}">${authorDisplay}</a>\n`;
-                    telegramMessage += `<a href="https://vk.com/wall${repost.owner_id}_${repost.id}">Оригинальный пост</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(repost.text.substring(0, 200) + (repost.text.length > 200 ? '...' : ''))}</i>`;
+                    telegramMessage += `<b>Репостнул:</b> <a href="https://vk.com/id${repostObject.from_id}">${authorDisplay}</a>\n`;
+                    telegramMessage += `<a href="https://vk.com/wall${originalPost.owner_id}_${originalPost.id}">Оригинальный пост</a>\n`;
+                    if (originalPost.text) {
+                        telegramMessage += `<i>${escapeHtml(originalPost.text.substring(0, 200) + (originalPost.text.length > 200 ? '...' : ''))}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено wall_repost без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено wall_repost без оригинального поста или объекта:`, object);
                     telegramMessage = `🔁 <b>Новый репост в VK:</b> (некорректный объект репоста)`;
                 }
                 break;
 
-            case 'wall_reply_new': // Новый комментарий к записи на стене
+
+            case 'wall_reply_new':
                 const wallComment = object;
-                if (wallComment && wallComment.text) {
+                if (wallComment) {
                     userName = await getVkUserName(wallComment.from_id);
                     authorDisplay = userName ? userName : `ID ${wallComment.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(wallComment.attachments, `https://vk.com/wall${wallComment.owner_id}_${wallComment.post_id}?reply=${wallComment.id}`);
+
                     telegramMessage = `💬 <b>Новый комментарий к посту в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${wallComment.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/wall${wallComment.owner_id}_${wallComment.post_id}?reply=${wallComment.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(wallComment.text)}</i>`;
+                    if (wallComment.text) {
+                        telegramMessage += `<i>${escapeHtml(wallComment.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено wall_reply_new без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено wall_reply_new без объекта:`, object);
                     telegramMessage = `💬 <b>Новый комментарий к посту в VK:</b> (некорректный объект комментария)`;
                 }
                 break;
 
-            case 'wall_reply_edit': // Изменение комментария к записи на стене
+            case 'wall_reply_edit':
                 const wallCommentEdit = object;
-                if (wallCommentEdit && wallCommentEdit.text) {
+                if (wallCommentEdit) {
                     userName = await getVkUserName(wallCommentEdit.from_id);
                     authorDisplay = userName ? userName : `ID ${wallCommentEdit.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(wallCommentEdit.attachments, `https://vk.com/wall${wallCommentEdit.owner_id}_${wallCommentEdit.post_id}?reply=${wallCommentEdit.id}`);
+
                     telegramMessage = `✏️ <b>Комментарий к посту изменен в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${wallCommentEdit.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/wall${wallCommentEdit.owner_id}_${wallCommentEdit.post_id}?reply=${wallCommentEdit.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(wallCommentEdit.text)}</i>`;
+                    if (wallCommentEdit.text) {
+                        telegramMessage += `<i>${escapeHtml(wallCommentEdit.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено wall_reply_edit без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено wall_reply_edit без объекта:`, object);
                     telegramMessage = `✏️ <b>Комментарий к посту изменен в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'wall_reply_delete': // Удаление комментария к записи на стене
+            case 'wall_reply_delete':
                 const wallCommentDelete = object;
                 if (wallCommentDelete && wallCommentDelete.deleter_id) {
                     userName = await getVkUserName(wallCommentDelete.deleter_id);
@@ -217,39 +457,53 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'board_post_new': // Новое сообщение в обсуждении
+            case 'board_post_new':
                 const boardPost = object;
-                if (boardPost && boardPost.text) {
+                if (boardPost) {
                     userName = await getVkUserName(boardPost.from_id);
                     authorDisplay = userName ? userName : `ID ${boardPost.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(boardPost.attachments, `https://vk.com/topic-${boardPost.group_id}_${boardPost.topic_id}?post=${boardPost.id}`);
+
                     telegramMessage = `💬 <b>Новое сообщение в обсуждении VK:</b>\n`;
                     telegramMessage += `<b>Тема:</b> ${escapeHtml(boardPost.topic_title || 'Без названия')}\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${boardPost.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/topic-${boardPost.group_id}_${boardPost.topic_id}?post=${boardPost.id}">Ссылка на сообщение</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(boardPost.text)}</i>`;
+                    if (boardPost.text) {
+                        telegramMessage += `<i>${escapeHtml(boardPost.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено board_post_new без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено board_post_new без объекта:`, object);
                     telegramMessage = `💬 <b>Новое сообщение в обсуждении VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'board_post_edit': // Изменение сообщения в обсуждении
+            case 'board_post_edit':
                 const boardPostEdit = object;
-                if (boardPostEdit && boardPostEdit.text) {
+                if (boardPostEdit) {
                     userName = await getVkUserName(boardPostEdit.from_id);
                     authorDisplay = userName ? userName : `ID ${boardPostEdit.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(boardPostEdit.attachments, `https://vk.com/topic-${boardPostEdit.group_id}_${boardPostEdit.topic_id}?post=${boardPostEdit.id}`);
+
                     telegramMessage = `✏️ <b>Сообщение в обсуждении изменено в VK:</b>\n`;
                     telegramMessage += `<b>Тема:</b> ${escapeHtml(boardPostEdit.topic_title || 'Без названия')}\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${boardPostEdit.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/topic-${boardPostEdit.group_id}_${boardPostEdit.topic_id}?post=${boardPostEdit.id}">Ссылка на сообщение</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(boardPostEdit.text)}</i>`;
+                    if (boardPostEdit.text) {
+                        telegramMessage += `<i>${escapeHtml(boardPostEdit.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено board_post_edit без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено board_post_edit без объекта:`, object);
                     telegramMessage = `✏️ <b>Сообщение в обсуждении изменено в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'board_post_delete': // Удаление сообщения в обсуждении
+            case 'board_post_delete':
                 const boardPostDelete = object;
                 if (boardPostDelete && boardPostDelete.id) {
                     telegramMessage = `🗑️ <b>Сообщение в обсуждении удалено в VK:</b>\n`;
@@ -263,7 +517,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
 
             case 'photo_new':
                 const photo = object.photo;
-                if (photo && photo.owner_id) {
+                if (photo) {
                     const photoUrl = photo.sizes?.find(s => s.type === 'x')?.url || photo.sizes?.[photo.sizes.length - 1]?.url;
                     userName = await getVkUserName(photo.owner_id);
                     ownerDisplay = userName ? userName : `ID ${photo.owner_id}`;
@@ -272,42 +526,56 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     telegramMessage += `<b>Владелец:</b> <a href="https://vk.com/id${photo.owner_id}">${ownerDisplay}</a>\n`;
                     telegramMessage += photoUrl ? `<a href="${photoUrl}">Ссылка на фото</a>` : `(Ссылка на фото недоступна)`;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено photo_new без owner_id или объекта фото:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено photo_new без объекта фото:`, object);
                     telegramMessage = `📸 <b>Новое фото в VK:</b> (некорректный объект фото)`;
                 }
                 break;
 
-            case 'photo_comment_new': // Новый комментарий к фотографии
+            case 'photo_comment_new':
                 const photoComment = object;
-                if (photoComment && photoComment.text) {
+                if (photoComment) {
                     userName = await getVkUserName(photoComment.from_id);
                     authorDisplay = userName ? userName : `ID ${photoComment.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(photoComment.attachments, `https://vk.com/photo${photoComment.owner_id}_${photoComment.photo_id}?reply=${photoComment.id}`);
+
                     telegramMessage = `💬 <b>Новый комментарий к фото в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${photoComment.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/photo${photoComment.owner_id}_${photoComment.photo_id}?reply=${photoComment.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(photoComment.text)}</i>`;
+                    if (photoComment.text) {
+                        telegramMessage += `<i>${escapeHtml(photoComment.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено photo_comment_new без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено photo_comment_new без объекта:`, object);
                     telegramMessage = `💬 <b>Новый комментарий к фото в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'photo_comment_edit': // Изменение комментария к фотографии
+            case 'photo_comment_edit':
                 const photoCommentEdit = object;
-                if (photoCommentEdit && photoCommentEdit.text) {
+                if (photoCommentEdit) {
                     userName = await getVkUserName(photoCommentEdit.from_id);
                     authorDisplay = userName ? userName : `ID ${photoCommentEdit.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(photoCommentEdit.attachments, `https://vk.com/photo${photoCommentEdit.owner_id}_${photoCommentEdit.photo_id}?reply=${photoCommentEdit.id}`);
+
                     telegramMessage = `✏️ <b>Комментарий к фото изменен в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${photoCommentEdit.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/photo${photoCommentEdit.owner_id}_${photoCommentEdit.photo_id}?reply=${photoCommentEdit.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(photoCommentEdit.text)}</i>`;
+                    if (photoCommentEdit.text) {
+                        telegramMessage += `<i>${escapeHtml(photoCommentEdit.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено photo_comment_edit без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено photo_comment_edit без объекта:`, object);
                     telegramMessage = `✏️ <b>Комментарий к фото изменен в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'photo_comment_delete': // Удаление комментария к фотографии
+            case 'photo_comment_delete':
                 const photoCommentDelete = object;
                 if (photoCommentDelete && photoCommentDelete.deleter_id) {
                     userName = await getVkUserName(photoCommentDelete.deleter_id);
@@ -324,7 +592,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
 
             case 'video_new':
                 const video = object.video;
-                if (video && video.owner_id) {
+                if (video) {
                     userName = await getVkUserName(video.owner_id);
                     ownerDisplay = userName ? userName : `ID ${video.owner_id}`;
 
@@ -333,42 +601,56 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     telegramMessage += `<b>Название:</b> ${escapeHtml(video.title || 'Без названия')}\n`;
                     telegramMessage += `<a href="https://vk.com/video${video.owner_id}_${video.id}">Ссылка на видео</a>`;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено video_new без owner_id или объекта видео:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено video_new без объекта видео:`, object);
                     telegramMessage = `🎥 <b>Новое видео в VK:</b> (некорректный объект видео)`;
                 }
                 break;
 
-            case 'video_comment_new': // Новый комментарий к видео
+            case 'video_comment_new':
                 const videoComment = object;
-                if (videoComment && videoComment.text) {
+                if (videoComment) {
                     userName = await getVkUserName(videoComment.from_id);
                     authorDisplay = userName ? userName : `ID ${videoComment.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(videoComment.attachments, `https://vk.com/video${videoComment.owner_id}_${videoComment.video_id}?reply=${videoComment.id}`);
+
                     telegramMessage = `💬 <b>Новый комментарий к видео в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${videoComment.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/video${videoComment.owner_id}_${videoComment.video_id}?reply=${videoComment.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(videoComment.text)}</i>`;
+                    if (videoComment.text) {
+                        telegramMessage += `<i>${escapeHtml(videoComment.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено video_comment_new без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено video_comment_new без объекта:`, object);
                     telegramMessage = `💬 <b>Новый комментарий к видео в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'video_comment_edit': // Изменение комментария к видео
+            case 'video_comment_edit':
                 const videoCommentEdit = object;
-                if (videoCommentEdit && videoCommentEdit.text) {
+                if (videoCommentEdit) {
                     userName = await getVkUserName(videoCommentEdit.from_id);
                     authorDisplay = userName ? userName : `ID ${videoCommentEdit.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(videoCommentEdit.attachments, `https://vk.com/video${videoCommentEdit.owner_id}_${videoCommentEdit.video_id}?reply=${videoCommentEdit.id}`);
+
                     telegramMessage = `✏️ <b>Комментарий к видео изменен в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${videoCommentEdit.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/video${videoCommentEdit.owner_id}_${videoCommentEdit.video_id}?reply=${videoCommentEdit.id}">Ссылка на комментарий</a>\n`;
-                    telegramMessage += `<i>${escapeHtml(videoCommentEdit.text)}</i>`;
+                    if (videoCommentEdit.text) {
+                        telegramMessage += `<i>${escapeHtml(videoCommentEdit.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено video_comment_edit без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено video_comment_edit без объекта:`, object);
                     telegramMessage = `✏️ <b>Комментарий к видео изменен в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'video_comment_delete': // Удаление комментария к видео
+            case 'video_comment_delete':
                 const videoCommentDelete = object;
                 if (videoCommentDelete && videoCommentDelete.deleter_id) {
                     userName = await getVkUserName(videoCommentDelete.deleter_id);
@@ -383,9 +665,9 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'audio_new': // Новая аудиозапись
+            case 'audio_new':
                 const audio = object.audio;
-                if (audio && audio.owner_id) {
+                if (audio) {
                     userName = await getVkUserName(audio.owner_id);
                     ownerDisplay = userName ? userName : `ID ${audio.owner_id}`;
                     telegramMessage = `🎵 <b>Новая аудиозапись в VK:</b>\n`;
@@ -393,12 +675,12 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     telegramMessage += `<b>Название:</b> ${escapeHtml(audio.title || 'Без названия')}\n`;
                     telegramMessage += `<b>Добавил:</b> <a href="https://vk.com/id${audio.owner_id}">${ownerDisplay}</a>`;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено audio_new без owner_id или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено audio_new без объекта:`, object);
                     telegramMessage = `🎵 <b>Новая аудиозапись в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'market_order_new': // Новый заказ в товарах
+            case 'market_order_new':
                 const order = object.order;
                 if (order && order.id) {
                     userName = await getVkUserName(order.user_id);
@@ -414,37 +696,51 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'market_comment_new': // Новый комментарий к товару
+            case 'market_comment_new':
                 const marketComment = object;
-                if (marketComment && marketComment.text) {
+                if (marketComment) {
                     userName = await getVkUserName(marketComment.from_id);
                     authorDisplay = userName ? userName : `ID ${marketComment.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(marketComment.attachments); // Комментарии могут иметь вложения
+
                     telegramMessage = `💬 <b>Новый комментарий к товару в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${marketComment.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<b>Товар:</b> ID товара <code>${marketComment.item_id}</code>\n`;
-                    telegramMessage += `<i>${escapeHtml(marketComment.text)}</i>`;
+                    if (marketComment.text) {
+                        telegramMessage += `<i>${escapeHtml(marketComment.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено market_comment_new без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено market_comment_new без объекта:`, object);
                     telegramMessage = `💬 <b>Новый комментарий к товару в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'market_comment_edit': // Изменение комментария к товару
+            case 'market_comment_edit':
                 const marketCommentEdit = object;
-                if (marketCommentEdit && marketCommentEdit.text) {
+                if (marketCommentEdit) {
                     userName = await getVkUserName(marketCommentEdit.from_id);
                     authorDisplay = userName ? userName : `ID ${marketCommentEdit.from_id}`;
+                    attachmentsInfo = getAttachmentsInfo(marketCommentEdit.attachments);
+
                     telegramMessage = `✏️ <b>Комментарий к товару изменен в VK:</b>\n`;
                     telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${marketCommentEdit.from_id}">${authorDisplay}</a>\n`;
                     telegramMessage += `<b>Товар:</b> ID товара <code>${marketCommentEdit.item_id}</code>\n`;
-                    telegramMessage += `<i>${escapeHtml(marketCommentEdit.text)}</i>`;
+                    if (marketCommentEdit.text) {
+                        telegramMessage += `<i>${escapeHtml(marketCommentEdit.text)}</i>`;
+                    } else {
+                        telegramMessage += `<i>(без текста)</i>`;
+                    }
+                    telegramMessage += attachmentsInfo;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено market_comment_edit без текста или объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено market_comment_edit без объекта:`, object);
                     telegramMessage = `✏️ <b>Комментарий к товару изменен в VK:</b> (некорректный объект)`;
                 }
                 break;
 
-            case 'market_comment_delete': // Удаление комментария к товару
+            case 'market_comment_delete':
                 const marketCommentDelete = object;
                 if (marketCommentDelete && marketCommentDelete.deleter_id) {
                     userName = await getVkUserName(marketCommentDelete.deleter_id);
@@ -459,7 +755,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'poll_vote_new': // Новый голос в опросе
+            case 'poll_vote_new':
                 const pollVote = object;
                 if (pollVote && pollVote.user_id) {
                     userName = await getVkUserName(pollVote.user_id);
@@ -500,7 +796,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'group_change_photo': // Изменение главной фотографии сообщества
+            case 'group_change_photo':
                 const changePhoto = object;
                 if (changePhoto && changePhoto.user_id) {
                     userName = await getVkUserName(changePhoto.user_id);
@@ -513,7 +809,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'group_change_settings': // Изменение настроек сообщества
+            case 'group_change_settings':
                 const changeSettings = object;
                 if (changeSettings && changeSettings.user_id) {
                     userName = await getVkUserName(changeSettings.user_id);
@@ -527,7 +823,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'group_officers_edit': // Изменение списка руководителей сообщества
+            case 'group_officers_edit':
                 const officerEdit = object;
                 if (officerEdit && officerEdit.admin_id && officerEdit.user_id) {
                     const adminName = await getVkUserName(officerEdit.admin_id);
@@ -554,7 +850,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'user_block': // Пользователь заблокирован
+            case 'user_block':
                 const userBlock = object;
                 if (userBlock && userBlock.user_id && userBlock.admin_id) {
                     userName = await getVkUserName(userBlock.user_id);
@@ -572,7 +868,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'user_unblock': // Пользователь разблокирован
+            case 'user_unblock':
                 const userUnblock = object;
                 if (userUnblock && userUnblock.user_id && userUnblock.admin_id) {
                     userName = await getVkUserName(userUnblock.user_id);
@@ -589,7 +885,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'like_add': // Добавление лайка
+            case 'like_add':
                 const likeAdd = object;
                 if (likeAdd && likeAdd.liker_id) {
                     userName = await getVkUserName(likeAdd.liker_id);
@@ -602,7 +898,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     } else if (likeAdd.object_type === 'video' && likeAdd.owner_id && likeAdd.object_id) {
                         itemLink = `<a href="https://vk.com/video${likeAdd.owner_id}_${likeAdd.object_id}">видео</a>`;
                     } else if (likeAdd.object_type === 'comment' && likeAdd.owner_id && likeAdd.object_id) {
-                        itemLink = `комментарию (ID ${likeAdd.object_id})`; // Сложно получить прямую ссылку на комментарий без контекста поста/фото/видео
+                        itemLink = `комментарию (ID ${likeAdd.object_id})`;
                     }
                     telegramMessage = `👍 <b>Новый лайк в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeAdd.liker_id}">${likerDisplay}</a>\n`;
@@ -613,7 +909,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'like_remove': // Удаление лайка
+            case 'like_remove':
                 const likeRemove = object;
                 if (likeRemove && likeRemove.liker_id) {
                     userName = await getVkUserName(likeRemove.liker_id);
@@ -644,50 +940,14 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
         }
 
         if (telegramMessage) {
-            // Попытка отправить сообщение в Telegram с простой логикой повтора
-            let sent = false;
-            for (let i = 0; i < 3; i++) { // Повторить до 3 раз
-                try {
-                    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                        chat_id: TELEGRAM_CHAT_ID,
-                        text: telegramMessage,
-                        parse_mode: parseMode,
-                        disable_web_page_preview: true
-                    }, {
-                        timeout: 5000 // Таймаут 5 секунд для отправки в Telegram
-                    });
-                    console.log(`[${new Date().toISOString()}] Сообщение успешно отправлено в Telegram для типа события: ${type}. Попытка: ${i + 1}`);
-                    sent = true;
-                    break;
-                } catch (telegramSendError) {
-                    console.error(`[${new Date().toISOString()}] Ошибка при отправке сообщения в Telegram (попытка ${i + 1}):`, telegramSendError.response ? telegramSendError.response.data : telegramSendError.message);
-                    if (i < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Экспоненциальная задержка
-                }
-            }
-            if (!sent) {
-                console.error(`[${new Date().toISOString()}] Не удалось отправить сообщение в Telegram после нескольких попыток для типа события: ${type}`);
-                try {
-                    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                        chat_id: TELEGRAM_CHAT_ID,
-                        text: `❌ <b>Критическая ошибка:</b> Не удалось отправить уведомление о событии VK типа <code>${escapeHtml(type)}</code> в Telegram после нескольких попыток. Проверьте логи Railway.`,
-                        parse_mode: 'HTML',
-                        timeout: 5000
-                    });
-                } catch (finalTelegramError) {
-                    console.error(`[${new Date().toISOString()}] Окончательная ошибка при отправке критического уведомления в Telegram:`, finalTelegramError.message);
-                }
-            }
+            await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+            console.log(`[${new Date().toISOString()}] Сообщение успешно отправлено в Telegram для типа события: ${type}.`);
         }
 
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Критическая ошибка при обработке события VK или отправке сообщения в Telegram для типа ${type}:`, error.response ? error.response.data : error.message);
         try {
-            await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-                chat_id: TELEGRAM_CHAT_ID,
-                text: `❌ <b>Критическая ошибка при обработке события VK:</b>\nТип: <code>${escapeHtml(type)}</code>\nСообщение: ${escapeHtml(error.message || 'Неизвестная ошибка')}\n\nПроверьте логи Railway для деталей.`,
-                parse_mode: 'HTML',
-                timeout: 5000
-            });
+            await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, `❌ <b>Критическая ошибка при обработке события VK:</b>\nТип: <code>${escapeHtml(type)}</code>\nСообщение: ${escapeHtml(error.message || 'Неизвестная ошибка')}\n\nПроверьте логи Railway для деталей.`, { parse_mode: 'HTML' });
         } catch (telegramError) {
             console.error(`[${new Date().toISOString()}] Ошибка при отправке критического уведомления об ошибке в Telegram:`, telegramError.message);
         }
