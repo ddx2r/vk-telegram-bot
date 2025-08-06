@@ -1081,11 +1081,12 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
 
                     telegramMessage = `❤️ <b>Новый лайк в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeAdd.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>К:</b> ${objectTypeDisplayName}`;
+                    telegramMessage += `<b>К:</b> `;
                     if (objectLink) {
-                        telegramMessage += ` <a href="${objectLink}">ссылка</a>`;
+                        telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
                     } else {
-                        telegramMessage += ` ID <code>${likeAdd.object_id}</code>`;
+                        // Fallback if no specific link can be formed, just show type and ID
+                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeAdd.object_id}</code>`;
                     }
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_add без liker_id или объекта:`, object);
@@ -1103,11 +1104,12 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
 
                     telegramMessage = `💔 <b>Лайк удален в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeRemove.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>С:</b> ${objectTypeDisplayName}`;
+                    telegramMessage += `<b>С:</b> `; // Changed "К:" to "С:" for "from"
                     if (objectLink) {
-                        telegramMessage += ` <a href="${objectLink}">ссылка</a>`;
+                        telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
                     } else {
-                        telegramMessage += ` ID <code>${likeRemove.object_id}</code>`;
+                        // Fallback if no specific link can be formed, just show type and ID
+                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeRemove.object_id}</code>`;
                     }
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_remove без liker_id или объекта:`, object);
