@@ -115,6 +115,32 @@ async function getVkUserName(userId) {
     }
 }
 
+// Функция для получения общего количества лайков для объекта VK
+async function getVkLikesCount(ownerId, itemId, itemType) {
+    try {
+        const response = await axios.get(`https://api.vk.com/method/likes.getList`, {
+            params: {
+                type: itemType, // 'post', 'photo', 'video', 'comment', 'topic', 'market'
+                owner_id: ownerId,
+                item_id: itemId,
+                access_token: VK_API_TOKEN,
+                v: '5.131'
+            },
+            timeout: 5000 // Таймаут 5 секунд
+        });
+        
+        if (response.data && response.data.response && response.data.response.count !== undefined) {
+            return response.data.response.count;
+        }
+        console.warn(`[${new Date().toISOString()}] VK API не вернул количество лайков. Ответ:`, response.data);
+        return null; // Возвращаем null, если количество не найдено
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Ошибка при получении количества лайков для объекта ${itemType}:${ownerId}_${itemId}:`, error.response ? error.response.data : error.message);
+        return null; // Возвращаем null при ошибке
+    }
+}
+
+
 // Функция для отправки сообщения в Telegram с логикой повтора
 async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
     let sent = false;
@@ -1079,6 +1105,10 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     const objectTypeDisplayName = getObjectTypeDisplayName(likeAdd.object_type);
                     const objectLink = getObjectLinkForLike(likeAdd);
 
+                    // Получаем актуальное количество лайков
+                    const likesCount = await getVkLikesCount(likeAdd.owner_id, likeAdd.object_id, likeAdd.object_type);
+                    const likesCountText = likesCount !== null ? ` (Всего: ${likesCount})` : '';
+
                     telegramMessage = `❤️ <b>Новый лайк в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeAdd.liker_id}">${likerDisplay}</a>\n`;
                     telegramMessage += `<b>К:</b> `;
@@ -1088,6 +1118,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                         // Fallback if no specific link can be formed, just show type and ID
                         telegramMessage += `${objectTypeDisplayName} ID <code>${likeAdd.object_id}</code>`;
                     }
+                    telegramMessage += likesCountText;
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_add без liker_id или объекта:`, object);
                     telegramMessage = `❤️ <b>Новый лайк в VK:</b> (некорректный объект)`;
@@ -1102,6 +1133,10 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     const objectTypeDisplayName = getObjectTypeDisplayName(likeRemove.object_type);
                     const objectLink = getObjectLinkForLike(likeRemove);
 
+                    // Получаем актуальное количество лайков
+                    const likesCount = await getVkLikesCount(likeRemove.owner_id, likeRemove.object_id, likeRemove.object_type);
+                    const likesCountText = likesCount !== null ? ` (Осталось: ${likesCount})` : '';
+
                     telegramMessage = `💔 <b>Лайк удален в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeRemove.liker_id}">${likerDisplay}</a>\n`;
                     telegramMessage += `<b>С:</b> `; // Changed "К:" to "С:" for "from"
@@ -1111,6 +1146,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                         // Fallback if no specific link can be formed, just show type and ID
                         telegramMessage += `${objectTypeDisplayName} ID <code>${likeRemove.object_id}</code>`;
                     }
+                    telegramMessage += likesCountText;
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_remove без liker_id или объекта:`, object);
                     telegramMessage = `💔 <b>Лайк удален в VK:</b> (некорректный объект)`;
