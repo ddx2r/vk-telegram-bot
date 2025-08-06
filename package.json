@@ -1,0 +1,19 @@
+{
+  "name": "vk-telegram-bot",
+  "version": "1.0.0",
+  "description": "VK to Telegram Bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords":,
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2",
+    "body-parser": "^1.20.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "node-cache": "^5.1.2",
+    "crypto": "^1.0.1"
+  }
+}
