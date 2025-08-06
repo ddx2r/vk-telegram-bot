@@ -182,29 +182,36 @@ async function sendTelegramMedia(chatId, type, fileUrl, caption, options = {}) {
 
 // Функция для обработки вложений (фото, видео, аудио, документы)
 async function processAttachments(attachments, chatId, captionPrefix = '') {
-    let attachmentsText = '';
+    let attachmentsSummary = ''; // Это будет добавлено к основному сообщению
     if (!attachments || attachments.length === 0) {
-        return attachmentsText;
+        return attachmentsSummary;
     }
 
-    attachmentsText += '\n\n<b>Вложения:</b>\n';
+    attachmentsSummary += '\n\n<b>Вложения:</b>\n';
     for (const attach of attachments) {
+        let sentDirectly = false;
+        let fallbackLink = '';
+        let mediaCaption = '';
+
         switch (attach.type) {
             case 'photo':
                 const photo = attach.photo;
                 const photoUrl = photo.sizes?.find(s => s.type === 'x')?.url || photo.sizes?.[photo.sizes.length - 1]?.url;
                 if (photoUrl) {
-                    await sendTelegramMedia(chatId, 'photo', photoUrl, `${captionPrefix} Фото: ${escapeHtml(photo.text || '')}`);
-                    attachmentsText += `📸 <a href="${photoUrl}">Фото</a>`;
-                    if (photo.text) attachmentsText += ` <i>(${escapeHtml(photo.text)})</i>`;
-                    attachmentsText += '\n';
+                    mediaCaption = `${captionPrefix} Фото: ${escapeHtml(photo.text || '')}`;
+                    await sendTelegramMedia(chatId, 'photo', photoUrl, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = photoUrl; // Все равно предоставляем ссылку для контекста
                 }
+                attachmentsSummary += `📸 <a href="${fallbackLink || 'javascript:void(0)'}">Фото</a>`;
+                if (photo.text) attachmentsSummary += ` <i>(${escapeHtml(photo.text)})</i>`;
+                attachmentsSummary += '\n';
                 break;
             case 'video':
                 const video = attach.video;
-                let videoUrl = video.player; // Предпочтительный URL для проигрывания
-                if (!videoUrl && video.owner_id && video.id) {
-                    // Если player URL нет, пытаемся получить прямой URL через API
+                let directVideoUrl = null;
+                // Пытаемся получить прямую MP4 ссылку сначала
+                if (video.owner_id && video.id) {
                     try {
                         const videoResp = await axios.get(`https://api.vk.com/method/video.get`, {
                             params: {
@@ -215,62 +222,146 @@ async function processAttachments(attachments, chatId, captionPrefix = '') {
                             timeout: 5000
                         });
                         if (videoResp.data?.response?.items?.[0]?.files) {
-                            // Ищем самый высокий доступный mp4
-                            videoUrl = videoResp.data.response.items[0].files.mp4_1080 ||
-                                       videoResp.data.response.items[0].files.mp4_720 ||
-                                       videoResp.data.response.items[0].files.mp4_480 ||
-                                       videoResp.data.response.items[0].files.mp4_360 ||
-                                       videoResp.data.response.items[0].files.mp4_240;
+                            // Приоритизируем MP4 более высокого качества
+                            directVideoUrl = videoResp.data.response.items[0].files.mp4_1080 ||
+                                             videoResp.data.response.items[0].files.mp4_720 ||
+                                             videoResp.data.response.items[0].files.mp4_480 ||
+                                             videoResp.data.response.items[0].files.mp4_360 ||
+                                             videoResp.data.response.items[0].files.mp4_240;
                         }
                     } catch (error) {
                         console.error(`[${new Date().toISOString()}] Ошибка при получении URL видео через VK API:`, error.message);
                     }
                 }
-                if (videoUrl) {
-                    await sendTelegramMedia(chatId, 'video', videoUrl, `${captionPrefix} Видео: ${escapeHtml(video.title || 'Без названия')}`);
-                    attachmentsText += `🎥 <a href="${videoUrl}">Видео: ${escapeHtml(video.title || 'Без названия')}</a>\n`;
-                } else if (video.owner_id && video.id) {
-                    attachmentsText += `🎥 <a href="https://vk.com/video${video.owner_id}_${video.id}">Видео: ${escapeHtml(video.title || 'Без названия')}</a> (прямая отправка недоступна)\n`;
+
+                if (directVideoUrl) {
+                    mediaCaption = `${captionPrefix} Видео: ${escapeHtml(video.title || 'Без названия')}`;
+                    await sendTelegramMedia(chatId, 'video', directVideoUrl, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = directVideoUrl; // Предоставляем прямую ссылку, если успешно
+                } else if (video.player) { // Откат к URL проигрывателя, если прямая ссылка не найдена
+                    fallbackLink = video.player;
+                } else if (video.owner_id && video.id) { // Откат к ссылке на страницу VK
+                    fallbackLink = `https://vk.com/video${video.owner_id}_${video.id}`;
                 }
+
+                attachmentsSummary += `🎥 <a href="${fallbackLink || 'javascript:void(0)'}">Видео: ${escapeHtml(video.title || 'Без названия')}</a>`;
+                if (!sentDirectly) attachmentsSummary += ` (прямая отправка недоступна)`;
+                attachmentsSummary += '\n';
                 break;
             case 'audio':
                 const audio = attach.audio;
                 if (audio.url) {
-                    await sendTelegramMedia(chatId, 'audio', audio.url, `${captionPrefix} Аудио: ${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}`);
-                    attachmentsText += `🎵 <a href="${audio.url}">Аудио: ${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}</a>\n`;
+                    mediaCaption = `${captionPrefix} Аудио: ${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}`;
+                    await sendTelegramMedia(chatId, 'audio', audio.url, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = audio.url;
                 }
+                attachmentsSummary += `🎵 <a href="${fallbackLink || 'javascript:void(0)'}">Аудио: ${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}</a>\n`;
                 break;
             case 'doc':
                 const doc = attach.doc;
                 if (doc.url) {
-                    await sendTelegramMedia(chatId, 'document', doc.url, `${captionPrefix} Документ: ${escapeHtml(doc.title || 'Без названия')}`);
-                    attachmentsText += `📄 <a href="${doc.url}">Документ: ${escapeHtml(doc.title || 'Без названия')}</a>\n`;
+                    mediaCaption = `${captionPrefix} Документ: ${escapeHtml(doc.title || 'Без названия')}`;
+                    await sendTelegramMedia(chatId, 'document', doc.url, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = doc.url;
                 }
+                attachmentsSummary += `📄 <a href="${fallbackLink || 'javascript:void(0)'}">Документ: ${escapeHtml(doc.title || 'Без названия')}</a>\n`;
                 break;
             case 'link':
                 const link = attach.link;
                 if (link.url) {
-                    attachmentsText += `🔗 <a href="${link.url}">${escapeHtml(link.title || 'Ссылка')}</a>\n`;
+                    attachmentsSummary += `🔗 <a href="${link.url}">${escapeHtml(link.title || 'Ссылка')}</a>\n`;
                 }
                 break;
             case 'poll':
                 const poll = attach.poll;
                 if (poll.id) {
-                    attachmentsText += `📊 Опрос: ${escapeHtml(poll.question || 'Без вопроса')}\n`;
+                    attachmentsSummary += `📊 Опрос: ${escapeHtml(poll.question || 'Без вопроса')}\n`;
                 }
                 break;
             case 'wall': // Вложенный пост
                 const wallPost = attach.wall;
                 if (wallPost.owner_id && wallPost.id) {
-                    attachmentsText += `📝 Вложенный пост: <a href="https://vk.com/wall${wallPost.owner_id}_${wallPost.id}">Ссылка</a>\n`;
+                    attachmentsSummary += `📝 Вложенный пост: <a href="https://vk.com/wall${wallPost.owner_id}_${wallPost.id}">Ссылка</a>\n`;
                 }
                 break;
+            case 'graffiti':
+                const graffiti = attach.graffiti;
+                if (graffiti && graffiti.url) {
+                    // Граффити обычно являются изображениями, можно попробовать отправить напрямую как фото
+                    mediaCaption = `${captionPrefix} Граффити`;
+                    await sendTelegramMedia(chatId, 'photo', graffiti.url, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = graffiti.url;
+                }
+                attachmentsSummary += `🎨 <a href="${fallbackLink || 'javascript:void(0)'}">Граффити</a>\n`;
+                break;
+            case 'sticker':
+                const sticker = attach.sticker;
+                if (sticker && sticker.images_with_background && sticker.images_with_background.length > 0) {
+                    const stickerUrl = sticker.images_with_background[sticker.images_with_background.length - 1].url;
+                    mediaCaption = `${captionPrefix} Стикер`;
+                    await sendTelegramMedia(chatId, 'photo', stickerUrl, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = stickerUrl;
+                }
+                attachmentsSummary += `🖼️ <a href="${fallbackLink || 'javascript:void(0)'}">Стикер</a>\n`;
+                break;
+            case 'gift':
+                const gift = attach.gift;
+                if (gift && gift.thumb_256) {
+                    mediaCaption = `${captionPrefix} Подарок`;
+                    await sendTelegramMedia(chatId, 'photo', gift.thumb_256, mediaCaption);
+                    sentDirectly = true;
+                    fallbackLink = gift.thumb_256;
+                }
+                attachmentsSummary += `🎁 <a href="${fallbackLink || 'javascript:void(0)'}">Подарок</a>\n`;
+                break;
             default:
-                attachmentsText += `❓ Неизвестное вложение: ${attach.type}\n`;
+                console.log(`[${new Date().toISOString()}] Неизвестное или необработанное вложение: ${attach.type}`, attach);
+                attachmentsSummary += `❓ Неизвестное вложение: ${attach.type}\n`;
                 break;
         }
     }
-    return attachmentsText;
+    return attachmentsSummary;
+}
+
+// Helper for object type names for likes
+function getObjectTypeDisplayName(type) {
+    switch (type) {
+        case 'post': return 'посту';
+        case 'photo': return 'фотографии';
+        case 'video': return 'видео';
+        case 'comment': return 'комментарию';
+        case 'topic': return 'обсуждению';
+        case 'market': return 'товару';
+        default: return `объекту типа <code>${escapeHtml(type)}</code>`;
+    }
+}
+
+// Helper to construct VK object links for likes
+function getObjectLinkForLike(likeObject) {
+    const { object_type, owner_id, object_id, post_id } = likeObject;
+    if (!owner_id || !object_id) return null;
+
+    switch (object_type) {
+        case 'post': return `https://vk.com/wall${owner_id}_${object_id}`;
+        case 'photo': return `https://vk.com/photo${owner_id}_${object_id}`;
+        case 'video': return `https://vk.com/video${owner_id}_${object_id}`;
+        case 'comment':
+            // For comments, we need the parent post/photo/video ID to form a direct link.
+            // The `like_add` event provides `post_id` if it's a comment on a wall post/photo/video.
+            if (post_id) {
+                return `https://vk.com/wall${owner_id}_${post_id}?reply=${object_id}`;
+            }
+            // Fallback for comments where `post_id` is not provided (e.g., comments on discussions)
+            return `https://vk.com/id${owner_id}?w=wall${owner_id}_${object_id}`; // Generic fallback to owner's wall with comment ID
+        case 'topic': return `https://vk.com/topic-${VK_GROUP_ID}_${object_id}`; // VK_GROUP_ID is a global constant
+        case 'market': return `https://vk.com/market-${owner_id}?w=product-${owner_id}_${object_id}`;
+        default: return null;
+    }
 }
 
 
@@ -985,22 +1076,20 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 if (likeAdd && likeAdd.liker_id) {
                     userName = await getVkUserName(likeAdd.liker_id);
                     const likerDisplay = userName ? userName : `ID ${likeAdd.liker_id}`;
-                    let itemLink = '';
-                    if (likeAdd.object_type === 'post' && likeAdd.owner_id && likeAdd.object_id) {
-                        itemLink = `<a href="https://vk.com/wall${likeAdd.owner_id}_${likeAdd.object_id}">посту</a>`;
-                    } else if (likeAdd.object_type === 'photo' && likeAdd.owner_id && likeAdd.object_id) {
-                        itemLink = `<a href="https://vk.com/photo${likeAdd.owner_id}_${likeAdd.object_id}">фотографии</a>`;
-                    } else if (likeAdd.object_type === 'video' && likeAdd.owner_id && likeAdd.object_id) {
-                        itemLink = `<a href="https://vk.com/video${likeAdd.owner_id}_${likeAdd.object_id}">видео</a>`;
-                    } else if (likeAdd.object_type === 'comment' && likeAdd.owner_id && likeAdd.object_id) {
-                        itemLink = `комментарию (ID ${likeAdd.object_id})`;
-                    }
-                    telegramMessage = `👍 <b>Новый лайк в VK:</b>\n`;
+                    const objectTypeDisplayName = getObjectTypeDisplayName(likeAdd.object_type);
+                    const objectLink = getObjectLinkForLike(likeAdd);
+
+                    telegramMessage = `❤️ <b>Новый лайк в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeAdd.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>К:</b> ${itemLink || `объекту типа <code>${escapeHtml(likeAdd.object_type)}</code> ID <code>${likeAdd.object_id}</code>`}`;
+                    telegramMessage += `<b>К:</b> ${objectTypeDisplayName}`;
+                    if (objectLink) {
+                        telegramMessage += ` <a href="${objectLink}">ссылка</a>`;
+                    } else {
+                        telegramMessage += ` ID <code>${likeAdd.object_id}</code>`;
+                    }
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_add без liker_id или объекта:`, object);
-                    telegramMessage = `👍 <b>Новый лайк в VK:</b> (некорректный объект)`;
+                    telegramMessage = `❤️ <b>Новый лайк в VK:</b> (некорректный объект)`;
                 }
                 break;
 
@@ -1009,22 +1098,20 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 if (likeRemove && likeRemove.liker_id) {
                     userName = await getVkUserName(likeRemove.liker_id);
                     const likerDisplay = userName ? userName : `ID ${likeRemove.liker_id}`;
-                    let itemLink = '';
-                    if (likeRemove.object_type === 'post' && likeRemove.owner_id && likeRemove.object_id) {
-                        itemLink = `<a href="https://vk.com/wall${likeRemove.owner_id}_${likeRemove.object_id}">посту</a>`;
-                    } else if (likeRemove.object_type === 'photo' && likeRemove.owner_id && likeRemove.object_id) {
-                        itemLink = `<a href="https://vk.com/photo${likeRemove.owner_id}_${likeRemove.object_id}">фотографии</a>`;
-                    } else if (likeRemove.object_type === 'video' && likeRemove.owner_id && likeRemove.object_id) {
-                        itemLink = `<a href="https://vk.com/video${likeRemove.owner_id}_${likeRemove.object_id}">видео</a>`;
-                    } else if (likeRemove.object_type === 'comment' && likeRemove.owner_id && likeRemove.object_id) {
-                        itemLink = `комментарию (ID ${likeRemove.object_id})`;
-                    }
-                    telegramMessage = `👎 <b>Лайк удален в VK:</b>\n`;
+                    const objectTypeDisplayName = getObjectTypeDisplayName(likeRemove.object_type);
+                    const objectLink = getObjectLinkForLike(likeRemove);
+
+                    telegramMessage = `💔 <b>Лайк удален в VK:</b>\n`;
                     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeRemove.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>К:</b> ${itemLink || `объекту типа <code>${escapeHtml(likeRemove.object_type)}</code> ID <code>${likeRemove.object_id}</code>`}`;
+                    telegramMessage += `<b>С:</b> ${objectTypeDisplayName}`;
+                    if (objectLink) {
+                        telegramMessage += ` <a href="${objectLink}">ссылка</a>`;
+                    } else {
+                        telegramMessage += ` ID <code>${likeRemove.object_id}</code>`;
+                    }
                 } else {
                     console.warn(`[${new Date().toISOString()}] Получено like_remove без liker_id или объекта:`, object);
-                    telegramMessage = `👎 <b>Лайк удален в VK:</b> (некорректный объект)`;
+                    telegramMessage = `💔 <b>Лайк удален в VK:</b> (некорректный объект)`;
                 }
                 break;
 
