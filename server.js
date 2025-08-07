@@ -17,13 +17,13 @@ app.use(bodyParser.json());
 // Эти переменные будут установлены на Railway
 const VK_GROUP_ID = process.env.VK_GROUP_ID;
 const VK_SECRET_KEY = process.env.VK_SECRET_KEY;
-const VK_API_TOKEN = process.env.VK_API_TOKEN; // Добавлен VK API Token
+const VK_SERVICE_KEY = process.env.VK_SERVICE_KEY; // <-- Используем сервисный ключ доступа
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // Основной чат для пересылки событий
 
 // Проверка наличия всех необходимых переменных окружения
-if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_API_TOKEN || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) установлены.');
+if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_SERVICE_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) установлены.');
     process.exit(1); // Завершаем процесс, если переменные не установлены
 }
 
@@ -92,7 +92,7 @@ async function getVkUserName(userId) {
         const response = await axios.get(`https://api.vk.com/method/users.get`, {
             params: {
                 user_ids: userId,
-                access_token: VK_API_TOKEN,
+                access_token: VK_SERVICE_KEY,
                 v: '5.131' // Актуальная версия VK API
             },
             timeout: 5000 // Таймаут 5 секунд для запроса к VK API
@@ -121,7 +121,7 @@ async function getVkPostInfo(ownerId, postId) {
         const response = await axios.get(`https://api.vk.com/method/wall.getById`, {
             params: {
                 posts: `${ownerId}_${postId}`,
-                access_token: VK_API_TOKEN,
+                access_token: VK_SERVICE_KEY,
                 v: '5.131'
             },
             timeout: 5000
@@ -147,7 +147,7 @@ async function getVkLikesCount(ownerId, itemId, itemType) {
                 type: itemType, // 'post', 'photo', 'video', 'comment', 'topic', 'market'
                 owner_id: ownerId,
                 item_id: itemId,
-                access_token: VK_API_TOKEN,
+                access_token: VK_SERVICE_KEY,
                 v: '5.131'
             },
             timeout: 5000 // Таймаут 5 секунд
@@ -266,7 +266,7 @@ async function processAttachments(attachments, chatId, captionPrefix = '') {
                         const videoResp = await axios.get(`https://api.vk.com/method/video.get`, {
                             params: {
                                 videos: `${video.owner_id}_${video.id}`,
-                                access_token: VK_API_TOKEN,
+                                access_token: VK_SERVICE_KEY,
                                 v: '5.131'
                             },
                             timeout: 5000
@@ -806,7 +806,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                             const videoResp = await axios.get(`https://api.vk.com/method/video.get`, {
                                 params: {
                                     videos: `${video.owner_id}_${video.id}`,
-                                    access_token: VK_API_TOKEN,
+                                    access_token: VK_SERVICE_KEY,
                                     v: '5.131'
                                 },
                                 timeout: 5000
@@ -1130,7 +1130,8 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     if (!ownerId && likeObject.object_type === 'post') {
                          // Если owner_id отсутствует для поста, пытаемся получить его через API
                         console.log(`[${new Date().toISOString()}] Отсутствует owner_id для поста ID ${likeObject.object_id}. Попытка получить через API...`);
-                        const postInfo = await getVkPostInfo(likeObject.peer_id, likeObject.object_id);
+                        // Используем ID группы (отрицательный owner_id) для поиска поста, если owner_id отсутствует
+                        const postInfo = await getVkPostInfo(-group_id, likeObject.object_id);
                         if (postInfo) {
                             ownerId = postInfo.owner_id;
                             console.log(`[${new Date().toISOString()}] Успешно получен owner_id для поста: ${ownerId}`);
