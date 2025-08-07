@@ -21,17 +21,37 @@ const VK_SERVICE_KEY = process.env.VK_SERVICE_KEY; // <-- Используем �
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // Основной чат для пересылки событий
 const VK_API_TOKEN = process.env.VK_API_TOKEN; // Добавляем VK_API_TOKEN для нового запроса
+const WEBHOOK_URL = process.env.WEBHOOK_URL; // Новый - URL вашего приложения на Railway
 
 // Проверка наличия всех необходимых переменных окружения
-if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_SERVICE_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || !VK_API_TOKEN) {
-    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, VK_API_TOKEN) установлены.');
+if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_SERVICE_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || !VK_API_TOKEN || !WEBHOOK_URL) {
+    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, VK_API_TOKEN, WEBHOOK_URL) установлены.');
     process.exit(1); // Завершаем процесс, если переменные не установлены
 }
 
-// Инициализация Telegram бота
-// Внимание: для работы команд бота, он должен быть добавлен в чат и иметь доступ к сообщениям.
-// Если бот должен отвечать на команды в приватном чате, TELEGRAM_CHAT_ID должен быть ID этого приватного чата.
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true }); // Включаем polling для приема команд
+// Инициализация Telegram бота без polling, используя вебхуки
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+
+// Асинхронная функция для настройки вебхука Telegram
+async function setupWebhook() {
+    try {
+        await bot.setWebHook(`${WEBHOOK_URL}/telegram-webhook/${TELEGRAM_BOT_TOKEN}`);
+        console.log(`[${new Date().toISOString()}] Telegram webhook успешно установлен: ${WEBHOOK_URL}/telegram-webhook/${TELEGRAM_BOT_TOKEN}`);
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Ошибка при установке Telegram webhook:`, error.message);
+        // Не завершаем процесс, так как VK webhook должен работать
+    }
+}
+
+// Вызываем настройку вебхука при старте сервера
+setupWebhook();
+
+// Обработчик для Telegram вебхука
+app.post(`/telegram-webhook/${TELEGRAM_BOT_TOKEN}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+});
+
 
 // Инициализация кэша для дедупликации (TTL 60 секунд)
 // Внимание: Этот кэш является in-memory и будет сброшен при каждом перезапуске контейнера на Railway.
@@ -198,6 +218,12 @@ async function getVkUserName(userId) {
 // Новая асинхронная функция для получения количества лайков для поста
 // Используем wall.getById, так как он предоставляет детальную информацию о посте
 async function getPostLikesCount(ownerId, postId) {
+    // Добавлена проверка на существование ownerId и postId перед запросом
+    if (!ownerId || !postId) {
+        console.warn(`[${new Date().toISOString()}] Недостаточно данных для получения лайков (ownerId: ${ownerId}, postId: ${postId}).`);
+        return null;
+    }
+
     try {
         const response = await axios.get('https://api.vk.com/method/wall.getById', {
             params: {
@@ -309,7 +335,6 @@ async function sendTelegramMedia(chatId, type, fileUrl, caption, options = {}) {
         await sendTelegramMessageWithRetry(chatId, `⚠️ Ошибка при скачивании мультимедиа с VK: ${escapeHtml(downloadError.message)}. Возможно, ссылка устарела или недоступна.`, { parse_mode: 'HTML' });
     }
 }
-
 
 // Функция для обработки вложений (фото, видео, аудио, документы)
 async function processAttachments(attachments, chatId, captionPrefix = '') {
@@ -552,7 +577,7 @@ bot.onText(/\/settings/, async (msg) => {
         return;
     }
     // Отправляем клавиатуру с настройками
-    await sendVkMessageWithKeyboard(TELEGRAM_CHAT_ID);
+    await sendVkMessageWithKeyboard(chatId);
     await sendTelegramMessageWithRetry(chatId, 'Отправил в VK клавиатуру для управления уведомлениями. Нажмите на кнопку, чтобы включить/выключить событие.');
 });
 
@@ -564,18 +589,6 @@ bot.on('message', async (msg) => {
     // Игнорируем команды, которые мы уже обработали
     if (text && (text.startsWith('/status') || text.startsWith('/help') || text.startsWith('/my_chat_id') || text.startsWith('/settings'))) {
         return;
-    }
-
-    // Обработка команд с клавиатуры VK
-    if (text && msg.reply_to_message && msg.reply_to_message.text === 'Выберите тип событий для включения/выключения уведомлений:') {
-        const payload = JSON.parse(text.split('(')[0].trim());
-        if (payload && payload.command === 'toggle_notification') {
-            const eventType = payload.event_type;
-            eventToggleState[eventType] = !eventToggleState[eventType];
-            await sendVkMessageWithKeyboard(chatId); // Обновляем клавиатуру
-            const status = eventToggleState[eventType] ? 'включены' : 'выключены';
-            await sendTelegramMessageWithRetry(chatId, `Уведомления для события "${EVENT_NAMES[eventType]}" теперь ${status}.`);
-        }
     }
 });
 
@@ -806,7 +819,8 @@ app.post('/', async (req, res) => {
             case 'like_add':
             case 'like_remove':
                 const object = body.object;
-                if (object) {
+                // Добавлена проверка на наличие owner_id и object_id
+                if (object && object.owner_id && object.object_id) {
                     const likerName = await getVkUserName(object.liker_id) || `ID: <code>${object.liker_id}</code>`;
                     const objectLink = getObjectLinkForLike(object.owner_id, object.object_type, object.object_id, object.post_id);
                     const objectDisplayName = getObjectTypeDisplayName(object.object_type);
@@ -824,7 +838,7 @@ app.post('/', async (req, res) => {
     - От: <a href="https://vk.com/id${object.liker_id}">${likerName}</a>
     - На: ${objectDisplayName} <a href="${objectLink}">ссылка</a>${totalLikesMessage}`;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено ${type} без объекта:`, object);
+                    console.warn(`[${new Date().toISOString()}] Получено событие ${type} без owner_id или object_id.`, object);
                     telegramMessage = `❓ <b>Событие ${type}</b> (некорректный объект)`;
                 }
                 break;
