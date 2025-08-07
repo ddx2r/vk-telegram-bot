@@ -115,30 +115,6 @@ async function getVkUserName(userId) {
     }
 }
 
-// НОВАЯ ФУНКЦИЯ: для получения информации о посте VK по его ID
-async function getVkPostInfo(ownerId, postId) {
-    try {
-        const response = await axios.get(`https://api.vk.com/method/wall.getById`, {
-            params: {
-                posts: `${ownerId}_${postId}`,
-                access_token: VK_SERVICE_KEY,
-                v: '5.131'
-            },
-            timeout: 5000
-        });
-
-        if (response.data && response.data.response && response.data.response.length > 0) {
-            return response.data.response[0];
-        }
-        console.warn(`[${new Date().toISOString()}] VK API не вернул информацию о посте. Ответ:`, response.data);
-        return null;
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при получении информации о посте ${ownerId}_${postId}:`, error.response ? error.response.data : error.message);
-        return null;
-    }
-}
-
-
 // Функция для получения общего количества лайков для объекта VK
 async function getVkLikesCount(ownerId, itemId, itemType) {
     try {
@@ -152,7 +128,7 @@ async function getVkLikesCount(ownerId, itemId, itemType) {
             },
             timeout: 5000 // Таймаут 5 секунд
         });
-
+        
         if (response.data && response.data.response && response.data.response.count !== undefined) {
             return response.data.response.count;
         }
@@ -1124,24 +1100,6 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
 
                 if (likeObject && likeObject.liker_id && likeObject.object_type && likeObject.object_id) {
                     let ownerId = likeObject.owner_id;
-                    let objectLink = null;
-                    let objectTypeDisplayName = getObjectTypeDisplayName(likeObject.object_type);
-
-                    if (!ownerId && likeObject.object_type === 'post') {
-                         // Если owner_id отсутствует для поста, пытаемся получить его через API
-                        console.log(`[${new Date().toISOString()}] Отсутствует owner_id для поста ID ${likeObject.object_id}. Попытка получить через API...`);
-                        // Используем ID группы (отрицательный owner_id) для поиска поста, если owner_id отсутствует
-                        const postInfo = await getVkPostInfo(-group_id, likeObject.object_id);
-                        if (postInfo) {
-                            ownerId = postInfo.owner_id;
-                            console.log(`[${new Date().toISOString()}] Успешно получен owner_id для поста: ${ownerId}`);
-                        } else {
-                            console.warn(`[${new Date().toISOString()}] Не удалось получить owner_id для поста ID ${likeObject.object_id} через API.`);
-                        }
-                    }
-
-                    if (ownerId) {
-                         objectLink = getObjectLinkForLike(ownerId, likeObject.object_type, likeObject.object_id, likeObject.post_id);
                     // Если owner_id отсутствует, по умолчанию используем ID группы
                     if (!ownerId || ownerId === null) {
                         ownerId = -group_id;
