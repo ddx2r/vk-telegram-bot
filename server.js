@@ -115,6 +115,30 @@ async function getVkUserName(userId) {
     }
 }
 
+// НОВАЯ ФУНКЦИЯ: для получения информации о посте VK по его ID
+async function getVkPostInfo(ownerId, postId) {
+    try {
+        const response = await axios.get(`https://api.vk.com/method/wall.getById`, {
+            params: {
+                posts: `${ownerId}_${postId}`,
+                access_token: VK_API_TOKEN,
+                v: '5.131'
+            },
+            timeout: 5000
+        });
+
+        if (response.data && response.data.response && response.data.response.length > 0) {
+            return response.data.response[0];
+        }
+        console.warn(`[${new Date().toISOString()}] VK API не вернул информацию о посте. Ответ:`, response.data);
+        return null;
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Ошибка при получении информации о посте ${ownerId}_${postId}:`, error.response ? error.response.data : error.message);
+        return null;
+    }
+}
+
+
 // Функция для получения общего количества лайков для объекта VK
 async function getVkLikesCount(ownerId, itemId, itemType) {
     try {
@@ -368,34 +392,20 @@ function getObjectTypeDisplayName(type) {
 }
 
 // Helper to construct VK object links for likes
-function getObjectLinkForLike(likeObject) {
-    const { object_type, owner_id, object_id, post_id } = likeObject;
-
-    // Внимание: Здесь мы добавили логирование, чтобы помочь отладить проблему
-    if (!owner_id) {
-        console.warn(`[${new Date().toISOString()}] Внимание: owner_id отсутствует для события 'like' (тип объекта: ${object_type}, ID объекта: ${object_id}). Ссылка не может быть сформирована.`);
-        return null;
-    }
-    
-    if (!object_id) {
-        console.warn(`[${new Date().toISOString()}] Внимание: object_id отсутствует для события 'like' (тип объекта: ${object_type}). Ссылка не может быть сформирована.`);
-        return null;
+function getObjectLinkForLike(ownerId, objectType, objectId, postId) {
+    // Для лайков на комментарии, если есть post_id, используем его для построения ссылки на комментарий в контексте поста
+    if (objectType === 'comment' && postId) {
+        return `https://vk.com/wall${ownerId}_${postId}?reply=${objectId}`;
     }
 
-    switch (object_type) {
-        case 'post': return `https://vk.com/wall${owner_id}_${object_id}`;
-        case 'photo': return `https://vk.com/photo${owner_id}_${object_id}`;
-        case 'video': return `https://vk.com/video${owner_id}_${object_id}`;
-        case 'comment':
-            // For comments, we need the parent post/photo/video ID to form a direct link.
-            // The `like_add` event provides `post_id` if it's a comment on a wall post/photo/video.
-            if (post_id) {
-                return `https://vk.com/wall${owner_id}_${post_id}?reply=${object_id}`;
-            }
-            // Fallback for comments where `post_id` is not provided (e.g., comments on discussions)
-            return `https://vk.com/id${owner_id}?w=wall${owner_id}_${object_id}`; // Generic fallback to owner's wall with comment ID
-        case 'topic': return `https://vk.com/topic-${VK_GROUP_ID}_${object_id}`; // VK_GROUP_ID is a global constant
-        case 'market': return `https://vk.com/market-${owner_id}?w=product-${owner_id}_${object_id}`;
+    // Для остальных типов, строим простую ссылку
+    switch (objectType) {
+        case 'post': return `https://vk.com/wall${ownerId}_${objectId}`;
+        case 'photo': return `https://vk.com/photo${ownerId}_${objectId}`;
+        case 'video': return `https://vk.com/video${ownerId}_${objectId}`;
+        case 'comment': return `https://vk.com/id${ownerId}?w=wall${ownerId}_${objectId}`; // Fallback для комментариев без post_id
+        case 'topic': return `https://vk.com/topic-${VK_GROUP_ID}_${objectId}`;
+        case 'market': return `https://vk.com/market-${ownerId}?w=product-${ownerId}_${objectId}`;
         default: return null;
     }
 }
@@ -1108,58 +1118,50 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 break;
 
             case 'like_add':
-                const likeAdd = object;
-                if (likeAdd && likeAdd.liker_id) {
-                    userName = await getVkUserName(likeAdd.liker_id);
-                    const likerDisplay = userName ? userName : `ID ${likeAdd.liker_id}`;
-                    const objectTypeDisplayName = getObjectTypeDisplayName(likeAdd.object_type);
-                    const objectLink = getObjectLinkForLike(likeAdd);
+            case 'like_remove':
+                const isAdd = type === 'like_add';
+                const likeObject = object;
 
-                    // Получаем актуальное количество лайков
-                    const likesCount = await getVkLikesCount(likeAdd.owner_id, likeAdd.object_id, likeAdd.object_type);
+                if (likeObject && likeObject.liker_id && likeObject.object_type && likeObject.object_id) {
+                    let ownerId = likeObject.owner_id;
+                    let objectLink = null;
+                    let objectTypeDisplayName = getObjectTypeDisplayName(likeObject.object_type);
+
+                    if (!ownerId && likeObject.object_type === 'post') {
+                         // Если owner_id отсутствует для поста, пытаемся получить его через API
+                        console.log(`[${new Date().toISOString()}] Отсутствует owner_id для поста ID ${likeObject.object_id}. Попытка получить через API...`);
+                        const postInfo = await getVkPostInfo(likeObject.peer_id, likeObject.object_id);
+                        if (postInfo) {
+                            ownerId = postInfo.owner_id;
+                            console.log(`[${new Date().toISOString()}] Успешно получен owner_id для поста: ${ownerId}`);
+                        } else {
+                            console.warn(`[${new Date().toISOString()}] Не удалось получить owner_id для поста ID ${likeObject.object_id} через API.`);
+                        }
+                    }
+
+                    if (ownerId) {
+                         objectLink = getObjectLinkForLike(ownerId, likeObject.object_type, likeObject.object_id, likeObject.post_id);
+                    }
+
+                    const userName = await getVkUserName(likeObject.liker_id);
+                    const likerDisplay = userName ? userName : `ID ${likeObject.liker_id}`;
+
+                    const likesCount = ownerId ? await getVkLikesCount(ownerId, likeObject.object_id, likeObject.object_type) : null;
                     const likesCountText = likesCount !== null ? ` (Всего: ${likesCount})` : '';
 
-                    telegramMessage = `❤️ <b>Новый лайк в VK:</b>\n`;
-                    telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeAdd.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>К:</b> `;
+                    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}</b>\n`;
+                    telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeObject.liker_id}">${likerDisplay}</a>\n`;
+                    telegramMessage += `<b>${isAdd ? 'К' : 'С'}:</b> `;
+
                     if (objectLink) {
                         telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
                     } else {
-                        // Fallback if no specific link can be formed, just show type and ID
-                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeAdd.object_id}</code>`;
+                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeObject.object_id}</code>`;
                     }
                     telegramMessage += likesCountText;
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено like_add без liker_id или объекта:`, object);
-                    telegramMessage = `❤️ <b>Новый лайк в VK:</b> (некорректный объект)`;
-                }
-                break;
-
-            case 'like_remove':
-                const likeRemove = object;
-                if (likeRemove && likeRemove.liker_id) {
-                    userName = await getVkUserName(likeRemove.liker_id);
-                    const likerDisplay = userName ? userName : `ID ${likeRemove.liker_id}`;
-                    const objectTypeDisplayName = getObjectTypeDisplayName(likeRemove.object_type);
-                    const objectLink = getObjectLinkForLike(likeRemove);
-
-                    // Получаем актуальное количество лайков
-                    const likesCount = await getVkLikesCount(likeRemove.owner_id, likeRemove.object_id, likeRemove.object_type);
-                    const likesCountText = likesCount !== null ? ` (Осталось: ${likesCount})` : '';
-
-                    telegramMessage = `💔 <b>Лайк удален в VK:</b>\n`;
-                    telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeRemove.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>С:</b> `; // Changed "К:" to "С:" for "from"
-                    if (objectLink) {
-                        telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
-                    } else {
-                        // Fallback if no specific link can be formed, just show type and ID
-                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeRemove.object_id}</code>`;
-                    }
-                    telegramMessage += likesCountText;
-                } else {
-                    console.warn(`[${new Date().toISOString()}] Получено like_remove без liker_id или объекта:`, object);
-                    telegramMessage = `💔 <b>Лайк удален в VK:</b> (некорректный объект)`;
+                    console.warn(`[${new Date().toISOString()}] Получено событие '${type}' без необходимых полей (liker_id, object_type, object_id):`, likeObject);
+                    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}:</b> (некорректный объект)`;
                 }
                 break;
 
