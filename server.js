@@ -500,7 +500,8 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
     const eventHash = crypto.createHash('md5').update(JSON.stringify({ type, objectId })).digest('hex');
 
     if (deduplicationCache.has(eventHash)) {
-        console.log(`[${new Date().toISOString()}] Дублирующееся событие получено и проигнорировано: Тип: ${type}, Хеш: ${eventHash}`);
+        // Закомментируем это сообщение, чтобы не засорять логи. Логика дедупликации всё ещё работает.
+        // console.log(`[${new Date().toISOString()}] Дублирующееся событие получено и проигнорировано: Тип: ${type}, Хеш: ${eventHash}`);
         return res.send('ok');
     }
     deduplicationCache.set(eventHash, true);
