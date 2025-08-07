@@ -540,14 +540,17 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 break;
 
             case 'wall_post_new':
-                const post = object.post;
-                if (post) {
-                    userName = await getVkUserName(post.from_id);
-                    authorDisplay = userName ? userName : `ID ${post.from_id}`;
+                // VK API может отправлять данные поста либо в 'object.post', либо напрямую в 'object'.
+                // Мы проверяем оба варианта.
+                const post = object.post || object;
+                if (post && post.owner_id && post.id) {
+                    const fromId = post.from_id || post.owner_id;
+                    const userName = await getVkUserName(fromId);
+                    const authorDisplay = userName ? userName : `ID ${fromId}`;
                     attachmentsInfo = await processAttachments(post.attachments, TELEGRAM_CHAT_ID, `Пост от ${authorDisplay}:`);
 
                     telegramMessage = `📝 <b>Новый пост на стене VK:</b>\n`;
-                    telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${post.from_id}">${authorDisplay}</a>\n`;
+                    telegramMessage += `<b>Автор:</b> <a href="https://vk.com/id${fromId}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/wall${post.owner_id}_${post.id}">Ссылка на пост</a>\n`;
                     if (post.text) {
                         telegramMessage += `<i>${escapeHtml(post.text)}</i>`;
@@ -555,21 +558,22 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                         telegramMessage += `<i>(без текста)</i>`;
                     }
                 } else {
-                    console.warn(`[${new Date().toISOString()}] Получено wall_post_new без объекта поста:`, object);
-                    telegramMessage = `📝 <b>Новый пост на стене VK:</b> (некорректный объект поста)`;
+                    console.warn(`[${new Date().toISOString()}] Получено wall_post_new без необходимых полей:`, object);
+                    telegramMessage = `📝 <b>Новый пост на стене VK:</b> (некорректный или неполный объект поста)`;
                 }
                 break;
 
             case 'wall_repost':
-                const repostObject = object.post;
+                const repostObject = object.post || object;
                 const originalPost = repostObject?.copy_history?.[0];
                 if (repostObject && originalPost) {
-                    userName = await getVkUserName(repostObject.from_id);
-                    authorDisplay = userName ? userName : `ID ${repostObject.from_id}`;
+                    const fromId = repostObject.from_id || repostObject.owner_id;
+                    userName = await getVkUserName(fromId);
+                    authorDisplay = userName ? userName : `ID ${fromId}`;
                     attachmentsInfo = await processAttachments(originalPost.attachments, TELEGRAM_CHAT_ID, `Репост от ${authorDisplay}:`);
 
                     telegramMessage = `🔁 <b>Новый репост в VK:</b>\n`;
-                    telegramMessage += `<b>Репостнул:</b> <a href="https://vk.com/id${repostObject.from_id}">${authorDisplay}</a>\n`;
+                    telegramMessage += `<b>Репостнул:</b> <a href="https://vk.com/id${fromId}">${authorDisplay}</a>\n`;
                     telegramMessage += `<a href="https://vk.com/wall${originalPost.owner_id}_${originalPost.id}">Оригинальный пост</a>\n`;
                     if (originalPost.text) {
                         telegramMessage += `<i>${escapeHtml(originalPost.text.substring(0, 200) + (originalPost.text.length > 200 ? '...' : ''))}</i>`;
