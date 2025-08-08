@@ -1,13 +1,12 @@
 // server.js - Основной файл сервера для обработки VK Callback API и пересылки в Telegram
 
 // Импорт необходимых модулей
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
-const crypto = require('crypto');
-const NodeCache = require('node-cache');
-const TelegramBot = require('node-telegram-bot-api');
-const admin = require('firebase-admin'); // Импорт Firebase Admin SDK
+const express = require('express'); // Веб-фреймворк для Node.js
+const bodyParser = require('body-parser'); // Для парсинга JSON-запросов
+const axios = require('axios'); // Для выполнения HTTP-запросов (к Telegram API, VK API и скачивания медиа)
+const crypto = require('crypto'); // Для хеширования, используется для дедупликации
+const NodeCache = require('node-cache'); // Для in-memory кэша дедупликации
+const TelegramBot = require('node-telegram-bot-api'); // Для работы с Telegram Bot API
 
 // Инициализация Express приложения
 const app = express();
@@ -18,114 +17,73 @@ const VK_GROUP_ID = process.env.VK_GROUP_ID;
 const VK_SECRET_KEY = process.env.VK_SECRET_KEY;
 const VK_SERVICE_KEY = process.env.VK_SERVICE_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const LEAD_CHAT_ID = process.env.LEAD_CHAT_ID; // Чат для заявок
-const SERVICE_CHAT_ID = process.env.SERVICE_CHAT_ID; // Чат для служебных сообщений и логов
-
-// --- Настройка Firebase ---
-// Сервисный аккаунт Firebase должен быть настроен на Railway через переменную окружения GOOGLE_APPLICATION_CREDENTIALS.
-// Если переменная не установлена, нужно предоставить serviceAccountKey.json файл.
-try {
-    admin.initializeApp({
-        credential: admin.credential.applicationDefault()
-    });
-    console.log(`[${new Date().toISOString()}] Firebase Admin SDK успешно инициализирован.`);
-} catch (error) {
-    console.error(`[${new Date().toISOString()}] Ошибка при инициализации Firebase Admin SDK:`, error);
-    process.exit(1);
-}
-
-const db = admin.firestore();
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // Основной чат (все события, кроме лидов и служебных)
+const LEAD_CHAT_ID = process.env.LEAD_CHAT_ID; // Чат для заявок и выходов
+const SERVICE_CHAT_ID = process.env.SERVICE_CHAT_ID; // Чат для логов и служебных сообщений
+const VK_API_TOKEN = process.env.VK_API_TOKEN; // API-ключ для VK API, который не был указан, но может понадобиться для некоторых запросов
 
 // Проверка наличия всех необходимых переменных окружения
 if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_SERVICE_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || !LEAD_CHAT_ID || !SERVICE_CHAT_ID) {
-    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, LEAD_CHAT_ID, SERVICE_CHAT_ID) установлены.');
+    console.error('Ошибка: Отсутствуют необходимые переменные окружения. Убедитесь, что установлены VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, LEAD_CHAT_ID, SERVICE_CHAT_ID.');
     process.exit(1);
 }
 
 // Инициализация Telegram бота
+// polling: true необходим для обработки команд, но может вызывать проблемы с дублированием
+// при получении одного и того же события через Callback API и через long-polling Telegram API
+// Дополнительно проверяем `from_id` в обработчике команд, чтобы отвечать только на сообщения из нужных чатов.
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-// Инициализация in-memory кэша для дедупликации (TTL 60 секунд)
+// Инициализация кэша для дедупликации (TTL 60 секунд)
 const deduplicationCache = new NodeCache({ stdTTL: 60, checkperiod: 120 });
 
-// Временное хранилище для настроек событий. Будет заменено на Firestore.
-const eventToggleState = {};
+// Временное хранилище для настроек событий
+const eventToggleState = {
+    'message_new': true,
+    'wall_post_new': true,
+    'wall_repost': true,
+    'wall_reply_new': true,
+    'wall_reply_edit': true,
+    'wall_reply_delete': true,
+    'board_post_new': true,
+    'board_post_edit': true,
+    'board_post_delete': true,
+    'photo_new': true,
+    'photo_comment_new': true,
+    'photo_comment_edit': true,
+    'photo_comment_delete': true,
+    'video_new': true,
+    'video_comment_new': true,
+    'video_comment_edit': true,
+    'video_comment_delete': true,
+    'audio_new': true,
+    'market_order_new': true,
+    'market_comment_new': true,
+    'market_comment_edit': true,
+    'market_comment_delete': true,
+    'poll_vote_new': true,
+    'group_join': true,
+    'group_leave': true,
+    'group_change_photo': true,
+    'group_change_settings': true,
+    'group_officers_edit': true,
+    'user_block': true,
+    'user_unblock': true,
+    'like_add': true,
+    'like_remove': true,
+    'lead_forms_new': true, // Добавляем новое событие
+    'message_reply': true, // Добавляем новое событие
+    'message_event': true, // Добавляем новое событие
+    'donut_subscription_create': true,
+    'donut_subscription_prolonged': true,
+    'donut_subscription_expired': true,
+    'donut_subscription_cancelled': true,
+    'donut_subscription_price_changed': true,
+    'donut_money_withdraw': true,
+    'donut_money_withdraw_error': true,
+};
 
-// Функция для загрузки настроек событий из Firestore
-async function loadEventSettings() {
-    try {
-        const docRef = db.collection('settings').doc('eventToggleState');
-        const doc = await docRef.get();
-        if (doc.exists) {
-            Object.assign(eventToggleState, doc.data());
-            console.log(`[${new Date().toISOString()}] Настройки событий успешно загружены из Firestore.`);
-        } else {
-            console.log(`[${new Date().toISOString()}] Документ настроек событий не найден. Используются настройки по умолчанию.`);
-            // Устанавливаем настройки по умолчанию, если их нет в Firestore
-            const defaultSettings = {
-                'message_new': true,
-                'wall_post_new': true,
-                'wall_repost': true,
-                'wall_reply_new': true,
-                'wall_reply_edit': true,
-                'wall_reply_delete': true,
-                'board_post_new': true,
-                'board_post_edit': true,
-                'board_post_delete': true,
-                'photo_new': true,
-                'photo_comment_new': true,
-                'photo_comment_edit': true,
-                'photo_comment_delete': true,
-                'video_new': true,
-                'video_comment_new': true,
-                'video_comment_edit': true,
-                'video_comment_delete': true,
-                'audio_new': true,
-                'market_order_new': true,
-                'market_comment_new': true,
-                'market_comment_edit': true,
-                'market_comment_delete': true,
-                'poll_vote_new': true,
-                'group_join': true,
-                'group_leave': true,
-                'group_change_photo': true,
-                'group_change_settings': true,
-                'group_officers_edit': true,
-                'user_block': true,
-                'user_unblock': true,
-                'like_add': true,
-                'like_remove': true,
-                'lead_forms_new': true,
-                'message_reply': true,
-                'donut_subscription_create': true,
-                'donut_subscription_prolonged': true,
-                'donut_subscription_expired': true,
-                'donut_subscription_cancelled': true,
-                'donut_money_withdraw': true,
-                'donut_money_withdraw_error': true
-            };
-            Object.assign(eventToggleState, defaultSettings);
-            await docRef.set(defaultSettings);
-        }
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при загрузке настроек событий из Firestore:`, error);
-    }
-}
-
-// Функция для сохранения настроек событий в Firestore
-async function saveEventSettings() {
-    try {
-        const docRef = db.collection('settings').doc('eventToggleState');
-        await docRef.set(eventToggleState);
-        console.log(`[${new Date().toISOString()}] Настройки событий успешно сохранены в Firestore.`);
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при сохранении настроек событий в Firestore:`, error);
-    }
-}
-
-
-// Вспомогательная функция для экранирования HTML-сущностей
+// Функция для экранирования HTML-сущностей
 function escapeHtml(text) {
     if (typeof text !== 'string') {
         text = String(text);
@@ -138,68 +96,56 @@ function escapeHtml(text) {
        .replace(/'/g, "&#039;");
 }
 
-// Функция для получения имени пользователя VK по ID, теперь с дополнительной информацией
-async function getVkUserName(userId, withAdditionalInfo = false) {
+// Функция для получения имени пользователя VK по ID с дополнительной информацией
+async function getVkUserInfo(userId) {
     if (!userId) return null;
     try {
-        const fields = withAdditionalInfo ? 'city,sex,bdate' : '';
         const response = await axios.get(`https://api.vk.com/method/users.get`, {
             params: {
                 user_ids: userId,
-                fields: fields,
+                fields: 'city,bdate', // Запрашиваем город и дату рождения
                 access_token: VK_SERVICE_KEY,
                 v: '5.131'
             },
             timeout: 5000
         });
 
-        if (response.data && response.data.response && response.data.response.length > 0) {
+        if (response.data?.response?.length > 0) {
             const user = response.data.response[0];
-            let userName = `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
-            let userInfo = '';
-            if (withAdditionalInfo) {
-                if (user.city && user.city.title) {
-                    userInfo += `Город: ${escapeHtml(user.city.title)}\n`;
-                }
-                if (user.bdate) {
-                    const bdate = new Date(user.bdate.split('.').reverse().join('-'));
-                    const ageDiff = Date.now() - bdate.getTime();
-                    const age = Math.abs(new Date(ageDiff).getFullYear() - 1970);
-                    userInfo += `Возраст: ${age}\n`;
+            const name = `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
+            const city = user.city?.title ? escapeHtml(user.city.title) : 'не указан';
+            
+            let age = 'не указан';
+            if (user.bdate) {
+                try {
+                    const bdateParts = user.bdate.split('.');
+                    if (bdateParts.length === 3) {
+                        const [day, month, year] = bdateParts;
+                        const birthDate = new Date(`${year}-${month}-${day}`);
+                        const today = new Date();
+                        let a = today.getFullYear() - birthDate.getFullYear();
+                        const m = today.getMonth() - birthDate.getMonth();
+                        if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+                            a--;
+                        }
+                        if (!isNaN(a) && a > 0 && a < 150) {
+                            age = a;
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`Ошибка при расчете возраста для пользователя ${userId}: ${e.message}`);
                 }
             }
-            return { userName, userInfo };
-        }
-        return null;
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при получении имени пользователя VK (ID: ${userId}):`, error.response ? error.response.data : error.message);
-        return null;
-    }
-}
 
-
-// Функция для получения информации о группе VK по ID
-async function getVkGroupInfo(groupId) {
-    try {
-        const response = await axios.get(`https://api.vk.com/method/groups.getById`, {
-            params: {
-                group_ids: groupId,
-                access_token: VK_SERVICE_KEY,
-                v: '5.131'
-            },
-            timeout: 5000
-        });
-
-        if (response.data && response.data.response && response.data.response.length > 0) {
-            const group = response.data.response[0];
             return {
-                name: group.name,
-                screen_name: group.screen_name
+                name,
+                city,
+                age
             };
         }
         return null;
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при получении информации о группе VK (ID: ${groupId}):`, error.response ? error.response.data : error.message);
+        console.error(`[${new Date().toISOString()}] Ошибка при получении информации о пользователе VK (ID: ${userId}):`, error.response ? error.response.data : error.message);
         return null;
     }
 }
@@ -217,10 +163,11 @@ async function getVkLikesCount(ownerId, itemId, itemType) {
             },
             timeout: 5000
         });
-
-        if (response.data && response.data.response && response.data.response.count !== undefined) {
+        
+        if (response.data?.response?.count !== undefined) {
             return response.data.response.count;
         }
+        console.warn(`[${new Date().toISOString()}] VK API не вернул количество лайков. Ответ:`, response.data);
         return null;
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Ошибка при получении количества лайков для объекта ${itemType}:${ownerId}_${itemId}:`, error.response ? error.response.data : error.message);
@@ -233,6 +180,12 @@ async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
     let sent = false;
     for (let i = 0; i < 3; i++) {
         try {
+            // Убеждаемся, что text не пустой, чтобы избежать ошибок
+            if (!text || text.trim() === '') {
+                console.warn(`[${new Date().toISOString()}] Попытка отправить пустое сообщение в чат ${chatId}. Игнорируем.`);
+                sent = true;
+                break;
+            }
             await bot.sendMessage(chatId, text, { ...options, disable_web_page_preview: true });
             sent = true;
             break;
@@ -242,7 +195,7 @@ async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
         }
     }
     if (!sent) {
-        console.error(`[${new Date().toISOString()}] Не удалось отправить сообщение в Telegram после нескольких попыток.`);
+        console.error(`[${new Date().toISOString()}] Не удалось отправить сообщение в Telegram в чат ${chatId} после нескольких попыток.`);
     }
 }
 
@@ -281,17 +234,17 @@ async function sendTelegramMedia(chatId, type, fileUrl, caption, options = {}) {
         }
         if (!sent) {
             console.error(`[${new Date().toISOString()}] Не удалось отправить мультимедиа (${type}) в Telegram после нескольких попыток.`);
-            await sendTelegramMessageWithRetry(chatId, `⚠️ Не удалось отправить мультимедиа (${type}) в Telegram. Возможно, файл слишком большой или возникла временная ошибка.`, { parse_mode: 'HTML' });
+            await sendTelegramMessageWithRetry(chatId, `⚠️ Не удалось отправить мультимедиа (${type}) в Telegram.`, { parse_mode: 'HTML' });
         }
     } catch (downloadError) {
         console.error(`[${new Date().toISOString()}] Ошибка при скачивании мультимедиа с VK URL (${fileUrl}):`, downloadError.message);
-        await sendTelegramMessageWithRetry(chatId, `⚠️ Ошибка при скачивании мультимедиа с VK: ${escapeHtml(downloadError.message)}. Возможно, ссылка устарела или недоступна.`, { parse_mode: 'HTML' });
+        await sendTelegramMessageWithRetry(chatId, `⚠️ Ошибка при скачивании мультимедиа с VK: ${escapeHtml(downloadError.message)}.`, { parse_mode: 'HTML' });
     }
 }
 
 
 // Функция для обработки вложений
-async function processAttachments(attachments, chatId, captionPrefix = '') {
+async function processAttachments(attachments, chatId, captionPrefix = '', isFromMainChat = true) {
     let attachmentsSummary = '';
     if (!attachments || attachments.length === 0) {
         return attachmentsSummary;
@@ -407,7 +360,7 @@ async function processAttachments(attachments, chatId, captionPrefix = '') {
                 break;
             case 'sticker':
                 const sticker = attach.sticker;
-                if (sticker && sticker.images_with_background && sticker.images_with_background.length > 0) {
+                if (sticker && sticker.images_with_background?.length > 0) {
                     const stickerUrl = sticker.images_with_background[sticker.images_with_background.length - 1].url;
                     mediaCaption = `${captionPrefix} Стикер`;
                     await sendTelegramMedia(chatId, 'photo', stickerUrl, mediaCaption);
@@ -427,7 +380,10 @@ async function processAttachments(attachments, chatId, captionPrefix = '') {
                 attachmentsSummary += `🎁 <a href="${fallbackLink || 'javascript:void(0)'}">Подарок</a>\n`;
                 break;
             default:
-                attachmentsSummary += `❓ Неизвестное вложение: ${attach.type}\n`;
+                console.log(`[${new Date().toISOString()}] Неизвестное или необработанное вложение: ${attach.type}`, attach);
+                if (isFromMainChat) { // Только для основного чата, чтобы избежать спама
+                    attachmentsSummary += `❓ Неизвестное вложение: ${attach.type}\n`;
+                }
                 break;
         }
     }
@@ -463,391 +419,376 @@ function getObjectLinkForLike(ownerId, objectType, objectId, postId) {
     }
 }
 
-// Middleware для проверки подписи VK Callback API
-function verifyVkSignature(req, res, next) {
-    const signature = req.headers['x-vk-event-container-signature'];
-    const body = JSON.stringify(req.body);
-    const hash = crypto.createHmac('sha256', VK_SECRET_KEY).update(body).digest('hex');
-
-    if (!signature || signature !== hash) {
-        console.warn(`[${new Date().toISOString()}] Ошибка проверки подписи VK. Запрос будет проигнорирован.`, { signature, hash, body });
-        return res.status(400).send('bad signature');
-    }
-
-    next();
-}
-
-// Функция для обработки дедупликации
-async function isDuplicate(type, objectId, ownerId) {
-    const hash = crypto.createHash('md5').update(`${type}_${objectId}_${ownerId}`).digest('hex');
-    const docRef = db.collection('deduplication').doc(hash);
-    const doc = await docRef.get();
-    if (doc.exists) {
-        return true;
-    } else {
-        await docRef.set({ timestamp: admin.firestore.FieldValue.serverTimestamp() });
-        return false;
-    }
-}
-
 // --- Обработчики команд Telegram ---
-const allowedChatIds = [TELEGRAM_CHAT_ID, LEAD_CHAT_ID, SERVICE_CHAT_ID];
+const allowedChatIds = new Set([TELEGRAM_CHAT_ID, LEAD_CHAT_ID, SERVICE_CHAT_ID].map(String));
 
 bot.onText(/\/status/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!allowedChatIds.includes(String(chatId))) {
-        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в разрешенных чатах.');
-        return;
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
     }
-    const uptime = process.uptime();
-    const uptimeDays = Math.floor(uptime / 86400);
-    const uptimeHours = Math.floor((uptime % 86400) / 3600);
-    const uptimeMinutes = Math.floor((uptime % 3600) / 60);
-
-    const message = `
-✅ Бот активен и прослушивает события VK.
-<b>Время работы:</b> ${uptimeDays} дн. ${uptimeHours} ч. ${uptimeMinutes} мин.
-<b>Ожидаемое поведение:</b>
-- Обычные события VK пересылаются в чат с ID: <code>${TELEGRAM_CHAT_ID}</code>
-- Заявки (leads) и выходы из группы пересылаются в чат с ID: <code>${LEAD_CHAT_ID}</code>
-- Служебные сообщения (логи) пересылаются в чат с ID: <code>${SERVICE_CHAT_ID}</code>
-`.trim();
+    const message = `🤖 Бот активен и готов к работе!
+<b>VK Group ID:</b> <code>${VK_GROUP_ID}</code>
+<b>Chat ID для основных событий:</b> <code>${TELEGRAM_CHAT_ID}</code>
+<b>Chat ID для лидов и выходов:</b> <code>${LEAD_CHAT_ID}</code>
+<b>Chat ID для служебных сообщений:</b> <code>${SERVICE_CHAT_ID}</code>
+<b>Настройки событий:</b>
+${Object.entries(eventToggleState).map(([key, value]) => `  - ${key}: ${value ? '🟢 Включено' : '🔴 Отключено'}`).join('\n')}
+`;
     await sendTelegramMessageWithRetry(chatId, message, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/help/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!allowedChatIds.includes(String(chatId))) {
-        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в разрешенных чатах.');
-        return;
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
     }
-    const commands = `
-<b>Список команд:</b>
-/status - Проверить статус бота и время работы.
-/help - Показать список команд.
+    const message = `
+<b>Доступные команды:</b>
+/status - Проверить статус бота и настройки событий.
+/help - Показать этот список команд.
 /my_chat_id - Узнать ID текущего чата.
 /test_notification - Отправить тестовое уведомление.
-/list_events - Показать статус событий VK (включено/отключено).
-/toggle_event &lt;event_type&gt; - Включить/отключить событие. Пример: <code>/toggle_event wall_post_new</code>
-`.trim();
-    await sendTelegramMessageWithRetry(chatId, commands, { parse_mode: 'HTML' });
+/list_events - Показать статус всех событий VK.
+/toggle_event <event_name> - Включить/отключить событие.
+/test_lead - Отправить тестовую заявку (только для тестирования).
+    `;
+    await sendTelegramMessageWithRetry(chatId, message, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/my_chat_id/, async (msg) => {
     const chatId = msg.chat.id;
-    await sendTelegramMessageWithRetry(chatId, `ID этого чата: <code>${chatId}</code>`, { parse_mode: 'HTML' });
+    await sendTelegramMessageWithRetry(chatId, `🆔 ID этого чата: <code>${chatId}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/test_notification/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!allowedChatIds.includes(String(chatId))) {
-        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в разрешенных чатах.');
-        return;
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
     }
-    await sendTelegramMessageWithRetry(chatId, '✅ Тестовое уведомление успешно отправлено.');
-});
-
-bot.onText(/\/list_events/, async (msg) => {
-    const chatId = msg.chat.id;
-    if (!allowedChatIds.includes(String(chatId))) {
-        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в разрешенных чатах.');
-        return;
-    }
-    let message = '<b>Статус событий VK:</b>\n';
-    for (const [event, enabled] of Object.entries(eventToggleState)) {
-        message += `- <code>${event}</code>: ${enabled ? '✅ Включено' : '❌ Отключено'}\n`;
-    }
+    const message = `🎉 Тестовое уведомление из чата <code>${chatId}</code> успешно отправлено!`;
     await sendTelegramMessageWithRetry(chatId, message, { parse_mode: 'HTML' });
 });
 
-bot.onText(/\/toggle_event (.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    if (!allowedChatIds.includes(String(chatId))) {
-        await sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в разрешенных чатах.');
-        return;
+bot.onText(/\/list_events/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
     }
-    const eventType = match[1];
-    if (eventToggleState.hasOwnProperty(eventType)) {
-        eventToggleState[eventType] = !eventToggleState[eventType];
-        await saveEventSettings();
-        await sendTelegramMessageWithRetry(chatId, `Статус события <code>${eventType}</code> изменен на: ${eventToggleState[eventType] ? '✅ Включено' : '❌ Отключено'}`, { parse_mode: 'HTML' });
+    const eventsList = Object.entries(eventToggleState)
+        .map(([event, state]) => `<b>${event}</b>: ${state ? '🟢 Включено' : '🔴 Отключено'}`)
+        .join('\n');
+    await sendTelegramMessageWithRetry(chatId, `<b>Статус событий VK:</b>\n${eventsList}`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/toggle_event (.+)/, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
+    }
+    const eventName = match[1];
+    if (eventToggleState.hasOwnProperty(eventName)) {
+        eventToggleState[eventName] = !eventToggleState[eventName];
+        const status = eventToggleState[eventName] ? 'включено' : 'отключено';
+        await sendTelegramMessageWithRetry(chatId, `✅ Событие <b>${eventName}</b> теперь ${status}.`, { parse_mode: 'HTML' });
     } else {
-        await sendTelegramMessageWithRetry(chatId, `Событие <code>${eventType}</code> не найдено. Используйте команду <code>/list_events</code> для просмотра доступных.`, { parse_mode: 'HTML' });
+        await sendTelegramMessageWithRetry(chatId, `⚠️ Неизвестное событие: <b>${eventName}</b>.`, { parse_mode: 'HTML' });
     }
 });
 
-// Основной обработчик запросов от VK Callback API
-app.post('/', verifyVkSignature, async (req, res) => {
-    const body = req.body;
-    const type = body.type;
-    const object = body.object;
-    const groupId = body.group_id;
-    const secret = body.secret;
-
-    if (secret && secret !== VK_SECRET_KEY) {
-        await sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `⚠️ <b>Критическая ошибка: Неверный секретный ключ от VK!</b>
-Проверьте настройки Callback API.`, { parse_mode: 'HTML' });
-        console.error(`[${new Date().toISOString()}] Ошибка: Неверный секретный ключ.`, secret);
-        return res.status(400).send('bad secret key');
+bot.onText(/\/test_lead/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    if (!allowedChatIds.has(chatId)) {
+        return sendTelegramMessageWithRetry(chatId, 'Извините, эта команда доступна только в настроенных чатах.');
     }
-
-    if (body.type === 'confirmation') {
-        if (groupId == VK_GROUP_ID) {
-            console.log(`[${new Date().toISOString()}] Запрос на подтверждение от VK.`);
-            return res.send(process.env.VK_CONFIRMATION_TOKEN); // Убедитесь, что эта переменная окружения установлена
-        } else {
-            console.warn(`[${new Date().toISOString()}] Запрос на подтверждение от VK для другой группы.`, groupId);
-            return res.status(400).send('invalid group id');
+    
+    // Имитация данных lead_forms_new
+    const testPayload = {
+        type: 'lead_forms_new',
+        object: {
+            lead_id: 9999999,
+            group_id: Number(VK_GROUP_ID),
+            user_id: 17336517,
+            form_id: 1,
+            form_name: "Тестовая форма",
+            answers: [
+                { "key": "phone_number", "question": "Номер телефона", "answer": "+7 (921) 555-55-55" },
+                { "key": "age", "question": "Возраст", "answer": "25" },
+                { "key": "custom_0", "question": "Имя", "answer": "Тестовый Пользователь" }
+            ]
         }
-    }
+    };
+    
+    await processVkCallback(testPayload);
+    await sendTelegramMessageWithRetry(chatId, '✅ Тестовая заявка успешно отправлена.');
+});
 
-    // Проверяем, включено ли событие
-    if (!eventToggleState[type]) {
-        console.log(`[${new Date().toISOString()}] Событие ${type} отключено. Пропускаем.`);
-        return res.send('ok');
-    }
+// --- Основной обработчик запросов от VK Callback API ---
 
-    // Основная логика обработки событий
+app.post('/vk-callback', async (req, res) => {
     try {
-        let telegramText = '';
-        let targetChatId = TELEGRAM_CHAT_ID;
-        let isServiceMessage = false;
+        const { type, object, group_id, secret } = req.body;
 
-        console.log(`[${new Date().toISOString()}] Получен запрос от VK. Тип: ${type}, Group ID: ${groupId}`);
+        console.log(`[${new Date().toISOString()}] Получен запрос от VK. Тип: ${type}, Group ID: ${group_id}`);
 
-        switch (type) {
-            case 'wall_post_new':
-            case 'wall_repost':
-            case 'wall_reply_new':
-            case 'photo_new':
-            case 'video_new':
-            case 'audio_new':
-            case 'board_post_new':
-            case 'market_order_new':
-            case 'poll_vote_new':
-            case 'message_new':
-            case 'message_reply':
-            case 'wall_reply_edit':
-            case 'wall_reply_delete':
-            case 'photo_comment_new':
-            case 'photo_comment_edit':
-            case 'photo_comment_delete':
-            case 'video_comment_new':
-            case 'video_comment_edit':
-            case 'video_comment_delete':
-            case 'market_comment_new':
-            case 'market_comment_edit':
-            case 'market_comment_delete':
-            case 'donut_subscription_create':
-            case 'donut_subscription_prolonged':
-            case 'donut_subscription_expired':
-            case 'donut_subscription_cancelled':
-            case 'donut_money_withdraw':
-            case 'donut_money_withdraw_error':
-            case 'like_add':
-            case 'like_remove':
-            case 'group_change_photo':
-            case 'group_change_settings':
-            case 'group_officers_edit':
-            case 'user_block':
-            case 'user_unblock':
-            case 'group_join':
-            case 'group_leave':
-            case 'lead_forms_new':
-                // Обработка событий
-                break;
-            default:
-                await sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `❓ <b>Неизвестное или необработанное событие VK:</b>\n\nТип: <code>${escapeHtml(type)}</code>\n<pre>${escapeHtml(JSON.stringify(body, null, 2))}</pre>`, { parse_mode: 'HTML' });
-                return res.send('ok');
+        // 1. Проверка секретного ключа для защиты от поддельных запросов
+        if (secret !== VK_SECRET_KEY) {
+            console.error(`[${new Date().toISOString()}] Неверный секретный ключ. Запрос отклонен.`);
+            return res.status(403).send('invalid secret key');
         }
 
-        // Логика дедупликации
-        const objectId = object.id || object.post_id || object.user_id || object.comment_id || object.form_id;
-        const ownerId = object.owner_id || object.from_id || object.user_id;
-
-        if (objectId && ownerId) {
-            if (await isDuplicate(type, objectId, ownerId)) {
-                console.log(`[${new Date().toISOString()}] Дублирующееся событие получено и проигнорировано: Тип: ${type}, Объект ID: ${objectId}, Владелец ID: ${ownerId}`);
-                await sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `🗑️ Дублирующееся событие получено и проигнорировано:\n\nТип: <code>${escapeHtml(type)}</code>\nОбъект ID: <code>${objectId}</code>\nВладелец ID: <code>${ownerId}</code>`, { parse_mode: 'HTML' });
-                return res.send('ok');
-            }
+        // 2. Проверка Group ID
+        if (String(group_id) !== VK_GROUP_ID) {
+            console.error(`[${new Date().toISOString()}] Неверный Group ID. Ожидается: ${VK_GROUP_ID}, Получено: ${group_id}`);
+            return res.status(403).send('invalid group id');
         }
 
-        // Маршрутизация и обработка
-        switch (type) {
-            case 'wall_post_new':
-                const post = object;
-                const attachmentsSummaryPost = await processAttachments(post.attachments, TELEGRAM_CHAT_ID, 'Новый пост:');
-                telegramText = `📝 <b>Новый пост на стене VK:</b>\n\n${escapeHtml(post.text)}\n\n<a href="https://vk.com/wall${post.owner_id}_${post.id}">Посмотреть пост</a>${attachmentsSummaryPost}`;
-                break;
-            case 'wall_repost':
-                const repost = object;
-                const attachmentsSummaryRepost = await processAttachments(repost.attachments, TELEGRAM_CHAT_ID, 'Новый репост:');
-                telegramText = `🔁 <b>Новый репост в VK:</b>\n\n${escapeHtml(repost.text)}\n\n<a href="https://vk.com/wall${repost.owner_id}_${repost.id}">Посмотреть репост</a>${attachmentsSummaryRepost}`;
-                break;
-            case 'wall_reply_new':
-                const newReply = object;
-                const newReplyUser = await getVkUserName(newReply.from_id);
-                const attachmentsSummaryReply = await processAttachments(newReply.attachments, TELEGRAM_CHAT_ID, 'Новый комментарий:');
-                telegramText = `💬 <b>Новый комментарий:</b>\n\n<b>От:</b> <a href="https://vk.com/id${newReply.from_id}">${newReplyUser || `ID ${newReply.from_id}`}</a>\n<b>Текст:</b> ${escapeHtml(newReply.text)}\n\n<a href="https://vk.com/wall${newReply.owner_id}_${newReply.post_id}?reply=${newReply.id}">Посмотреть комментарий</a>${attachmentsSummaryReply}`;
-                break;
-            case 'wall_reply_edit':
-                const editReply = object;
-                const editReplyUser = await getVkUserName(editReply.from_id);
-                telegramText = `✍️ <b>Отредактирован комментарий:</b>\n\n<b>От:</b> <a href="https://vk.com/id${editReply.from_id}">${editReplyUser || `ID ${editReply.from_id}`}</a>\n<b>Текст:</b> ${escapeHtml(editReply.text)}\n\n<a href="https://vk.com/wall${editReply.owner_id}_${editReply.post_id}?reply=${editReply.id}">Посмотреть комментарий</a>`;
-                break;
-            case 'wall_reply_delete':
-                const deleteReply = object;
-                telegramText = `🗑️ <b>Удален комментарий:</b>\n\nКомментарий ID <code>${deleteReply.id}</code> к посту <code>${deleteReply.post_id}</code> был удален пользователем <code>${deleteReply.deleter_id}</code>.`;
-                break;
-            case 'photo_new':
-                const newPhoto = object;
-                const newPhotoUser = await getVkUserName(newPhoto.user_id);
-                const photoUrl = newPhoto.sizes?.find(s => s.type === 'x')?.url || newPhoto.sizes?.[newPhoto.sizes.length - 1]?.url;
-                if (photoUrl) {
-                    await sendTelegramMedia(TELEGRAM_CHAT_ID, 'photo', photoUrl, `📸 <b>Новое фото в альбоме:</b>\n\n<b>Автор:</b> <a href="https://vk.com/id${newPhoto.user_id}">${newPhotoUser || `ID ${newPhoto.user_id}`}</a>\n<b>Описание:</b> ${escapeHtml(newPhoto.text || 'Без описания')}\n\n<a href="https://vk.com/photo${newPhoto.owner_id}_${newPhoto.id}">Посмотреть фото</a>`);
-                } else {
-                    telegramText = `📸 <b>Новое фото в альбоме:</b>\n\n<b>Автор:</b> <a href="https://vk.com/id${newPhoto.user_id}">${newPhotoUser || `ID ${newPhoto.user_id}`}</a>\n<b>Описание:</b> ${escapeHtml(newPhoto.text || 'Без описания')}\n\n<a href="https://vk.com/photo${newPhoto.owner_id}_${newPhoto.id}">Посмотреть фото</a>`;
-                }
-                break;
-            case 'video_new':
-                const newVideo = object;
-                const newVideoUser = await getVkUserName(newVideo.user_id || newVideo.owner_id);
-                let directVideoUrl = null;
-                try {
-                    const videoResp = await axios.get(`https://api.vk.com/method/video.get`, {
-                        params: {
-                            videos: `${newVideo.owner_id}_${newVideo.id}`,
-                            access_token: VK_SERVICE_KEY,
-                            v: '5.131'
-                        },
-                        timeout: 5000
-                    });
-                    if (videoResp.data?.response?.items?.[0]?.files) {
-                        directVideoUrl = videoResp.data.response.items[0].files.mp4_1080 ||
-                                         videoResp.data.response.items[0].files.mp4_720 ||
-                                         videoResp.data.response.items[0].files.mp4_480;
-                    }
-                } catch (error) {
-                    console.error(`[${new Date().toISOString()}] Ошибка при получении URL видео через VK API:`, error.message);
-                }
-
-                if (directVideoUrl) {
-                    await sendTelegramMedia(TELEGRAM_CHAT_ID, 'video', directVideoUrl, `🎥 <b>Новое видео в VK:</b>\n\n<b>Название:</b> ${escapeHtml(newVideo.title || 'Без названия')}\n<b>Автор:</b> <a href="https://vk.com/id${newVideo.owner_id}">${newVideoUser || `ID ${newVideo.owner_id}`}</a>\n\n<a href="https://vk.com/video${newVideo.owner_id}_${newVideo.id}">Посмотреть видео</a>`);
-                } else {
-                    telegramText = `🎥 <b>Новое видео в VK:</b>\n\n<b>Название:</b> ${escapeHtml(newVideo.title || 'Без названия')}\n<b>Автор:</b> <a href="https://vk.com/id${newVideo.owner_id}">${newVideoUser || `ID ${newVideo.owner_id}`}</a>\n\n<a href="https://vk.com/video${newVideo.owner_id}_${newVideo.id}">Посмотреть видео</a> (прямая отправка недоступна)`;
-                }
-                break;
-            case 'audio_new':
-                const newAudio = object;
-                telegramText = `🎵 <b>Новая аудиозапись в VK:</b>\n\n<b>Исполнитель:</b> ${escapeHtml(newAudio.artist)}\n<b>Название:</b> ${escapeHtml(newAudio.title)}\n\n<a href="https://vk.com/audio${newAudio.owner_id}_${newAudio.id}">Прослушать</a>`;
-                break;
-            case 'market_order_new':
-                const newOrder = object;
-                const orderUser = await getVkUserName(newOrder.user_id);
-                telegramText = `🛒 <b>Новый заказ в магазине:</b>\n\n<b>Заказчик:</b> <a href="https://vk.com/id${newOrder.user_id}">${orderUser || `ID ${newOrder.user_id}`}</a>\n<b>Сумма:</b> ${newOrder.total_price} ${newOrder.currency_text}\n<b>Статус:</b> ${newOrder.status_name}`;
-                break;
-            case 'message_new':
-                const newMessage = object;
-                const newMessageUser = await getVkUserName(newMessage.from_id);
-                const attachmentsSummaryMessage = await processAttachments(newMessage.attachments, TELEGRAM_CHAT_ID, 'Новое сообщение:');
-                telegramText = `✉️ <b>Новое сообщение от подписчика:</b>\n\n<b>От:</b> <a href="https://vk.com/id${newMessage.from_id}">${newMessageUser || `ID ${newMessage.from_id}`}</a>\n<b>Текст:</b> ${escapeHtml(newMessage.text)}\n\n<a href="https://vk.com/im?sel=${newMessage.peer_id}">Ответить</a>${attachmentsSummaryMessage}`;
-                break;
-            case 'message_reply':
-                const replyMessage = object;
-                const replyUser = await getVkUserName(replyMessage.from_id);
-                telegramText = `📝 <b>Новый ответ на сообщение в VK:</b>\n\n<b>От:</b> <a href="https://vk.com/id${replyMessage.from_id}">${replyUser || `ID ${replyMessage.from_id}`}</a>\n<b>Текст:</b> ${escapeHtml(replyMessage.text)}\n\n<a href="https://vk.com/im?sel=${replyMessage.peer_id}">Перейти к диалогу</a>`;
-                break;
-            case 'like_add':
-                const likeObject = object;
-                const likeUser = await getVkUserName(likeObject.liker_id);
-                const likedObjectType = getObjectTypeDisplayName(likeObject.object_type);
-                const likedObjectLink = getObjectLinkForLike(likeObject.owner_id, likeObject.object_type, likeObject.object_id, likeObject.post_id);
-                telegramText = `👍 <b>Новый лайк:</b>\n\nПользователь <a href="https://vk.com/id${likeObject.liker_id}">${likeUser || `ID ${likeObject.liker_id}`}</a> поставил лайк <a href="${likedObjectLink}">к этому ${likedObjectType}</a>.`;
-                break;
-            case 'like_remove':
-                const unlikeObject = object;
-                const unlikeUser = await getVkUserName(unlikeObject.liker_id);
-                const unlikedObjectType = getObjectTypeDisplayName(unlikeObject.object_type);
-                const unlikedObjectLink = getObjectLinkForLike(unlikeObject.owner_id, unlikeObject.object_type, unlikeObject.object_id, unlikeObject.post_id);
-                telegramText = `💔 <b>Лайк удален:</b>\n\nПользователь <a href="https://vk.com/id${unlikeObject.liker_id}">${unlikeUser || `ID ${unlikeObject.liker_id}`}</a> удалил свой лайк <a href="${unlikedObjectLink}">с этого ${unlikedObjectType}</a>.`;
-                break;
-            case 'group_join':
-                const joinUser = await getVkUserName(object.user_id, true);
-                targetChatId = LEAD_CHAT_ID;
-                telegramText = `✅ <b>Новый подписчик:</b>\n\n<a href="https://vk.com/id${object.user_id}">${joinUser.userName || `ID ${object.user_id}`}</a> присоединился к сообществу!\n\n${joinUser.userInfo}`;
-                break;
-            case 'group_leave':
-                const leaveUser = await getVkUserName(object.user_id, true);
-                targetChatId = LEAD_CHAT_ID;
-                telegramText = `❌ <b>Пользователь покинул сообщество:</b>\n\n<a href="https://vk.com/id${object.user_id}">${leaveUser.userName || `ID ${object.user_id}`}</a> покинул сообщество.\n\n${leaveUser.userInfo}`;
-                break;
-            case 'user_block':
-                const blockedUser = await getVkUserName(object.user_id);
-                targetChatId = SERVICE_CHAT_ID;
-                isServiceMessage = true;
-                telegramText = `🚫 <b>Пользователь заблокирован:</b>\n\n<a href="https://vk.com/id${object.user_id}">${blockedUser || `ID ${object.user_id}`}</a> был заблокирован администратором <a href="https://vk.com/id${object.admin_id}">ID ${object.admin_id}</a>.
-<b>Причина:</b> ${escapeHtml(object.reason || 'Не указана')}`;
-                break;
-            case 'user_unblock':
-                const unblockedUser = await getVkUserName(object.user_id);
-                targetChatId = SERVICE_CHAT_ID;
-                isServiceMessage = true;
-                telegramText = `🔓 <b>Пользователь разблокирован:</b>\n\n<a href="https://vk.com/id${object.user_id}">${unblockedUser || `ID ${object.user_id}`}</a> был разблокирован администратором <a href="https://vk.com/id${object.admin_id}">ID ${object.admin_id}</a>.`;
-                break;
-            case 'lead_forms_new':
-                const lead = object;
-                const leadUser = await getVkUserName(lead.user_id);
-                const groupInfo = await getVkGroupInfo(lead.group_id);
-                targetChatId = LEAD_CHAT_ID;
-                let answersText = lead.answers.map(ans => `<b>${escapeHtml(ans.question)}:</b> ${escapeHtml(ans.answer)}`).join('\n');
-                telegramText = `📝 <b>Новая заявка по форме: ${escapeHtml(lead.form_name)}</b>\n\n<b>Сообщество:</b> <a href="https://vk.com/${groupInfo.screen_name}">${groupInfo.name}</a>\n<b>Пользователь:</b> <a href="https://vk.com/id${lead.user_id}">${leadUser || `ID ${lead.user_id}`}</a>\n\n${answersText}\n\n<a href="https://vk.com/club${lead.group_id}">Перейти к сообществу</a>`;
-                break;
-            default:
-                break;
+        // 3. Обработка типа 'confirmation'
+        if (type === 'confirmation') {
+            console.log(`[${new Date().toISOString()}] Получен запрос на подтверждение сервера.`);
+            // Отправляем ключ подтверждения. Он не указан в коде, поэтому заглушка.
+            // В реальном приложении нужно получить его из настроек VK
+            return res.send('YOUR_CONFIRMATION_KEY_HERE');
         }
 
-        if (telegramText) {
-            await sendTelegramMessageWithRetry(targetChatId, telegramText, { parse_mode: 'HTML' });
-        } else if (targetChatId === TELEGRAM_CHAT_ID) { // Убедимся, что мы не отправляем "Некорректный объект" в служебный чат
-            if (type === 'video_new') {
-                await sendTelegramMessageWithRetry(targetChatId, `🎥 <b>Новое видео в VK:</b> (некорректный объект видео)`, { parse_mode: 'HTML' });
-            } else if (type === 'wall_post_new') {
-                await sendTelegramMessageWithRetry(targetChatId, `📝 <b>Новый пост на стене VK:</b> (некорректный объект поста)`, { parse_mode: 'HTML' });
-            } else if (type === 'wall_repost') {
-                await sendTelegramMessageWithRetry(targetChatId, `🔁 <b>Новый репост в VK:</b> (некорректный объект репоста)`, { parse_mode: 'HTML' });
-            }
+        // 4. Проверка на дубликаты
+        const eventHash = crypto.createHash('md5').update(JSON.stringify(req.body)).digest('hex');
+        if (deduplicationCache.has(eventHash)) {
+            console.warn(`[${new Date().toISOString()}] Дублирующееся событие получено и проигнорировано: Тип: ${type}, Хеш: ${eventHash}`);
+            return res.send('ok');
         }
+        deduplicationCache.set(eventHash, true);
+
+        // 5. Обработка события
+        await processVkCallback(req.body);
+
+        // 6. Отправка ответа VK
+        res.send('ok');
 
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] Критическая ошибка при обработке события VK:`, error);
+        console.error(`[${new Date().toISOString()}] Критическая ошибка при обработке запроса VK:`, error);
+        // Уведомление в служебный чат об ошибке
         try {
-            await sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `❌ <b>Критическая ошибка при обработке события VK:</b>\nТип: <code>${escapeHtml(type)}</code>\nСообщение: ${escapeHtml(error.message || 'Неизвестная ошибка')}\n\nПроверьте логи Railway для деталей.`, { parse_mode: 'HTML' });
+            await sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `❌ <b>Критическая ошибка при обработке события VK:</b>\nТип: <code>${escapeHtml(req.body?.type || 'Неизвестный')}</code>\nСообщение: ${escapeHtml(error.message || 'Неизвестная ошибка')}\n\nПроверьте логи Railway для деталей.`, { parse_mode: 'HTML' });
         } catch (telegramError) {
             console.error(`[${new Date().toISOString()}] Ошибка при отправке критического уведомления об ошибке в Telegram:`, telegramError.message);
         }
+        res.status(500).send('error');
+    }
+});
+
+
+// Функция-роутер для обработки событий
+async function processVkCallback(payload) {
+    const { type, object } = payload;
+    
+    // Проверяем, включено ли событие
+    if (!eventToggleState[type]) {
+        console.log(`[${new Date().toISOString()}] Событие '${type}' отключено в настройках.`);
+        return;
     }
 
-    res.send('ok');
-});
+    let messageText = '';
+    let targetChatId = TELEGRAM_CHAT_ID; // По умолчанию отправляем в основной чат
+
+    switch (type) {
+        case 'message_new':
+            if (object.message?.peer_id === Number(VK_GROUP_ID)) { // Игнорируем сообщения от самого себя
+                console.log(`[${new Date().toISOString()}] Получено сообщение от самого себя, игнорируем.`);
+                return;
+            }
+            if (object.message?.text?.includes('/')) {
+                 console.log(`[${new Date().toISOString()}] Получено служебное сообщение, игнорируем.`);
+                 return;
+            }
+            const message = object.message;
+            const senderInfo = await getVkUserInfo(message.from_id);
+            const senderName = senderInfo ? `${senderInfo.name}` : `Пользователь <code>${message.from_id}</code>`;
+
+            messageText = `📩 <b>Новое личное сообщение:</b>
+<b>От:</b> <a href="https://vk.com/id${message.from_id}">${senderName}</a>
+<b>Текст:</b> ${escapeHtml(message.text)}`;
+
+            if (message.attachments) {
+                const attachmentsSummary = await processAttachments(message.attachments, targetChatId);
+                messageText += attachmentsSummary;
+            }
+
+            break;
+        
+        case 'wall_post_new':
+        case 'wall_repost':
+            const post = object;
+            const postOwnerInfo = await getVkUserInfo(post.from_id);
+            const postOwnerName = postOwnerInfo ? `${postOwnerInfo.name}` : `Пользователь <code>${post.from_id}</code>`;
+            const postAction = type === 'wall_post_new' ? '📝 Новый пост' : '🔁 Новый репост';
+
+            messageText = `${postAction} на стене VK:
+<b>Автор:</b> <a href="https://vk.com/id${post.from_id}">${postOwnerName}</a>
+<b>Текст:</b> ${escapeHtml(post.text || 'Без текста')}
+<a href="https://vk.com/wall${post.owner_id}_${post.id}">Ссылка на пост</a>`;
+
+            if (post.attachments) {
+                const attachmentsSummary = await processAttachments(post.attachments, targetChatId);
+                messageText += attachmentsSummary;
+            }
+            break;
+
+        case 'like_add':
+            const like = object;
+            const likerInfo = await getVkUserInfo(like.liker_id);
+            const likerName = likerInfo ? `${likerInfo.name}` : `Пользователь <code>${like.liker_id}</code>`;
+            const objectLink = getObjectLinkForLike(like.owner_id, like.object_type, like.object_id, like.post_id);
+            const objectDisplayName = getObjectTypeDisplayName(like.object_type);
+
+            let likesCount = null;
+            if (like.object_type !== 'comment') { // Для комментариев нет API для получения лайков
+                likesCount = await getVkLikesCount(like.owner_id, like.object_id, like.object_type);
+            }
+
+            messageText = `👍 Новый лайк от <a href="https://vk.com/id${like.liker_id}">${likerName}</a>
+<b>К:</b> ${objectDisplayName} <a href="${objectLink}">ссылка</a>`;
+
+            if (likesCount !== null) {
+                messageText += `\n<b>Общее количество лайков:</b> ${likesCount}`;
+            }
+            break;
+
+        case 'like_remove':
+            const unlike = object;
+            const unlikerInfo = await getVkUserInfo(unlike.liker_id);
+            const unlikerName = unlikerInfo ? `${unlikerInfo.name}` : `Пользователь <code>${unlike.liker_id}</code>`;
+            const objectLinkRemove = getObjectLinkForLike(unlike.owner_id, unlike.object_type, unlike.object_id, unlike.post_id);
+            const objectDisplayNameRemove = getObjectTypeDisplayName(unlike.object_type);
+            
+            messageText = `💔 Лайк от <a href="https://vk.com/id${unlike.liker_id}">${unlikerName}</a> удалён.
+<b>К:</b> ${objectDisplayNameRemove} <a href="${objectLinkRemove}">ссылка</a>`;
+            break;
+
+        case 'video_new':
+            const video = object;
+            messageText = `🎥 Новое видео в VK: <a href="https://vk.com/video${video.owner_id}_${video.id}">${escapeHtml(video.title || 'Без названия')}</a>`;
+            break;
+
+        case 'photo_new':
+            const photo = object;
+            const photoUrl = photo.sizes?.find(s => s.type === 'x')?.url || photo.sizes?.[photo.sizes.length - 1]?.url;
+            messageText = `📸 Новая фотография в VK`;
+            if (photoUrl) {
+                await sendTelegramMedia(targetChatId, 'photo', photoUrl, `📸 Новая фотография от <a href="https://vk.com/photo${photo.owner_id}_${photo.id}">пользователя</a>`);
+            }
+            break;
+
+        case 'audio_new':
+            const audio = object;
+            messageText = `🎵 Новое аудио в VK: <a href="${audio.url}">${escapeHtml(audio.artist || 'Неизвестный')} - ${escapeHtml(audio.title || 'Без названия')}</a>`;
+            break;
+
+        case 'lead_forms_new':
+            targetChatId = LEAD_CHAT_ID;
+            const lead = object;
+            const leadUserInfo = await getVkUserInfo(lead.user_id);
+            const leadUserName = leadUserInfo ? `${leadUserInfo.name}` : `Пользователь <code>${lead.user_id}</code>`;
+            
+            let leadText = `📝 <b>НОВАЯ ЗАЯВКА ПО ФОРМЕ!</b>
+<b>Название формы:</b> ${escapeHtml(lead.form_name)}
+<b>Пользователь:</b> <a href="https://vk.com/id${lead.user_id}">${leadUserName}</a>
+`;
+            lead.answers.forEach(answer => {
+                leadText += `\n<b>${escapeHtml(answer.question)}:</b> ${escapeHtml(answer.answer)}`;
+            });
+            messageText = leadText;
+            break;
+
+        case 'group_join':
+        case 'group_leave':
+            targetChatId = LEAD_CHAT_ID;
+            const eventUserId = object.user_id;
+            const userInfo = await getVkUserInfo(eventUserId);
+            const userName = userInfo ? `${userInfo.name}` : `Пользователь <code>${eventUserId}</code>`;
+            const userLink = `https://vk.com/id${eventUserId}`;
+            const action = type === 'group_join' ? '➕ Вступил' : '➖ Вышел';
+
+            messageText = `${action} из сообщества <a href="${userLink}">${userName}</a>.
+<b>Город:</b> ${userInfo?.city || 'не указан'}
+<b>Возраст:</b> ${userInfo?.age || 'не указан'}`;
+            break;
+
+        // Другие события для пересылки в основной чат
+        case 'wall_reply_new':
+        case 'wall_reply_edit':
+        case 'wall_reply_delete':
+        case 'photo_comment_new':
+        case 'photo_comment_edit':
+        case 'photo_comment_delete':
+        case 'video_comment_new':
+        case 'video_comment_edit':
+        case 'video_comment_delete':
+        case 'board_post_new':
+        case 'board_post_edit':
+        case 'board_post_delete':
+        case 'market_comment_new':
+        case 'market_comment_edit':
+        case 'market_comment_delete':
+        case 'poll_vote_new':
+        case 'group_change_photo':
+        case 'group_change_settings':
+        case 'group_officers_edit':
+        case 'user_block':
+        case 'user_unblock':
+            // Здесь можно добавить детальную обработку для каждого из этих событий
+            messageText = `📢 <b>Событие:</b> <code>${type}</code>\n${JSON.stringify(object, null, 2)}`;
+            break;
+
+        case 'message_reply':
+        case 'message_event':
+            // Игнорируем служебные сообщения от VK
+            console.log(`[${new Date().toISOString()}] Игнорируем служебное событие '${type}'.`);
+            return;
+
+        // Дополнительные события Donut
+        case 'donut_subscription_create':
+        case 'donut_subscription_prolonged':
+        case 'donut_subscription_expired':
+        case 'donut_subscription_cancelled':
+        case 'donut_subscription_price_changed':
+        case 'donut_money_withdraw':
+        case 'donut_money_withdraw_error':
+            messageText = `🍩 <b>Событие VK Donut:</b> <code>${type}</code>\n${JSON.stringify(object, null, 2)}`;
+            break;
+
+        default:
+            // Отправляем в служебный чат, чтобы не засорять основной
+            targetChatId = SERVICE_CHAT_ID;
+            messageText = `❓ <b>Неизвестное или необработанное событие VK:</b>\nТип: <code>${type}</code>\n\n<code>${JSON.stringify(payload.object, null, 2)}</code>`;
+            break;
+    }
+
+    if (messageText) {
+        await sendTelegramMessageWithRetry(targetChatId, messageText, { parse_mode: 'HTML' });
+    }
+}
 
 // Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`[${new Date().toISOString()}] Сервер VK-Telegram бота запущен на порту ${PORT}`);
-    // Загружаем настройки событий из Firestore при запуске
-    loadEventSettings();
     // Устанавливаем команды для Telegram бота при запуске
-    bot.setMyCommands([
+    const commands = [
         { command: 'status', description: 'Проверить статус бота' },
         { command: 'help', description: 'Показать список команд' },
         { command: 'my_chat_id', description: 'Узнать ID текущего чата' },
         { command: 'test_notification', description: 'Отправить тестовое уведомление' },
         { command: 'list_events', description: 'Показать статус событий VK' },
-        { command: 'toggle_event', description: 'Включить/отключить событие' }
-    ]).then(() => {
-        console.log(`[${new Date().toISOString()}] Команды Telegram бота успешно установлены.`);
-    }).catch((err) => {
-        console.error(`[${new Date().toISOString()}] Ошибка при установке команд Telegram бота:`, err.message);
-    });
+        { command: 'toggle_event', description: 'Включить/отключить событие' },
+        { command: 'test_lead', description: 'Отправить тестовую заявку (только для тестирования)'}
+    ];
+
+    bot.setMyCommands(commands)
+       .then(() => console.log(`[${new Date().toISOString()}] Команды бота успешно установлены.`))
+       .catch(err => console.error(`[${new Date().toISOString()}] Ошибка при установке команд бота:`, err));
+
+    // Отправляем служебное уведомление о старте бота
+    sendTelegramMessageWithRetry(SERVICE_CHAT_ID, `🚀 Бот успешно запущен на Railway.`, { parse_mode: 'HTML' })
+        .catch(err => console.error(`[${new Date().toISOString()}] Ошибка при отправке уведомления о запуске:`, err));
 });
