@@ -85,36 +85,87 @@ function escapeHtml(text) {
        .replace(/'/g, "&#039;");
 }
 
+// Простой кэш для хранения имен пользователей
+const userNameCache = new Map();
+
 // Функция для получения имени пользователя VK по ID
 async function getVkUserName(userId) {
-    if (!userId) return null; // Если userId не предоставлен, возвращаем null
+    if (!userId) return null;
+
+    // Проверка кэша
+    if (userNameCache.has(userId)) {
+        return userNameCache.get(userId);
+    }
+
     try {
+        // Валидация ID пользователя
+        if (!/^\d+$/.test(userId)) {
+            throw new Error(`Некорректный ID пользователя: ${userId}`);
+        }
+
         const response = await axios.get(`https://api.vk.com/method/users.get`, {
             params: {
                 user_ids: userId,
                 access_token: VK_SERVICE_KEY,
-                v: '5.131' // Актуальная версия VK API
+                v: '5.131',
+                lang: 'ru' // Ключевое исправление - принудительный русский язык
             },
-            timeout: 5000 // Таймаут 5 секунд для запроса к VK API
+            timeout: 5000
         });
 
-        if (response.data && response.data.response && response.data.response.length > 0) {
+        // Обработка ошибок API VK
+        if (response.data.error) {
+            throw new Error(`VK API: ${response.data.error.error_msg}`);
+        }
+
+        if (response.data.response && response.data.response.length > 0) {
             const user = response.data.response[0];
-            return `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
+            
+            // Обработка деактивированных аккаунтов
+            if (user.deactivated) {
+                const message = `[Деактивирован] ID: ${userId}`;
+                userNameCache.set(userId, message);
+                return message;
+            }
+            
+            const fullName = `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
+            userNameCache.set(userId, fullName);
+            return fullName;
         }
-        return null; // Возвращаем null, если имя не найдено
+        
+        return `Неизвестный пользователь (ID: ${userId})`;
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при получении имени пользователя VK (ID: ${userId}):`, error.response ? error.response.data : error.message);
-        // Отправляем сообщение об ошибке в Telegram (в основной чат)
+        console.error(`[${new Date().toLocaleString('ru-RU')}] Ошибка при получении имени (ID: ${userId}):`, error.message);
+        
+        // Отправка уведомления в Telegram
         try {
-            await bot.sendMessage(TELEGRAM_CHAT_ID, `⚠️ Ошибка при получении имени пользователя VK (ID: ${userId}): ${escapeHtml(error.message || 'Неизвестная ошибка')}. Событие будет отправлено с ID.`, { parse_mode: 'HTML', disable_web_page_preview: true });
+            const errorMessage = error.response?.data 
+                ? JSON.stringify(error.response.data) 
+                : error.message;
+                
+            await bot.sendMessage(
+                TELEGRAM_CHAT_ID,
+                `⚠️ VK Name Error (ID: ${userId}): ${escapeHtml(errorMessage.slice(0, 200))}`,
+                { parse_mode: 'HTML' }
+            );
         } catch (telegramError) {
-            console.error(`[${new Date().toISOString()}] Ошибка при отправке уведомления об ошибке в Telegram:`, telegramError.message);
+            console.error('Ошибка отправки в Telegram:', telegramError.message);
         }
-        return null; // Возвращаем null при ошибке
+        
+        return `ID: ${userId}`; // Возвращаем ID как fallback
     }
 }
 
+// Функция экранирования HTML (если еще не реализована)
+function escapeHtml(text) {
+    if (typeof text !== 'string') return text;
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
 // Функция для получения общего количества лайков для объекта VK
 async function getVkLikesCount(ownerId, itemId, itemType) {
     try {
