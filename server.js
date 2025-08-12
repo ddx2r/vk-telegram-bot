@@ -85,20 +85,14 @@ function escapeHtml(text) {
        .replace(/'/g, "&#039;");
 }
 
-// Простой кэш для хранения имен пользователей
-const userNameCache = new Map();
+// Удаляем кэш имен пользователей полностью
+// const userNameCache = new Map(); // УДАЛЕНО
 
 // Функция для получения имени пользователя VK по ID
 async function getVkUserName(userId) {
     if (!userId) return null;
 
-    // Проверка кэша
-    if (userNameCache.has(userId)) {
-        return userNameCache.get(userId);
-    }
-
     try {
-        // Валидация ID пользователя
         if (!/^\d+$/.test(userId)) {
             throw new Error(`Некорректный ID пользователя: ${userId}`);
         }
@@ -108,12 +102,11 @@ async function getVkUserName(userId) {
                 user_ids: userId,
                 access_token: VK_SERVICE_KEY,
                 v: '5.131',
-                lang: 'ru' // Ключевое исправление - принудительный русский язык
+                lang: 'ru' // Гарантируем русский язык
             },
             timeout: 5000
         });
 
-        // Обработка ошибок API VK
         if (response.data.error) {
             throw new Error(`VK API: ${response.data.error.error_msg}`);
         }
@@ -123,36 +116,17 @@ async function getVkUserName(userId) {
             
             // Обработка деактивированных аккаунтов
             if (user.deactivated) {
-                const message = `[Деактивирован] ID: ${userId}`;
-                userNameCache.set(userId, message);
-                return message;
+                return `[Деактивирован] ID: ${userId}`;
             }
             
-            const fullName = `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
-            userNameCache.set(userId, fullName);
-            return fullName;
+            // Форматируем имя на русском
+            return `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}`;
         }
         
-        return `Неизвестный пользователь (ID: ${userId})`;
+        return `ID: ${userId}`;
     } catch (error) {
-        console.error(`[${new Date().toLocaleString('ru-RU')}] Ошибка при получении имени (ID: ${userId}):`, error.message);
-        
-        // Отправка уведомления в Telegram
-        try {
-            const errorMessage = error.response?.data 
-                ? JSON.stringify(error.response.data) 
-                : error.message;
-                
-            await bot.sendMessage(
-                TELEGRAM_CHAT_ID,
-                `⚠️ VK Name Error (ID: ${userId}): ${escapeHtml(errorMessage.slice(0, 200))}`,
-                { parse_mode: 'HTML' }
-            );
-        } catch (telegramError) {
-            console.error('Ошибка отправки в Telegram:', telegramError.message);
-        }
-        
-        return `ID: ${userId}`; // Возвращаем ID как fallback
+        console.error(`Ошибка при получении имени (ID: ${userId}):`, error.message);
+        return `ID: ${userId}`;
     }
 }
 
