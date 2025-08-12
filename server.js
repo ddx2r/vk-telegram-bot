@@ -1079,18 +1079,37 @@ case 'message_reply':
         try {
             const userName = await getVkUserName(leadForm.user_id);
             const userDisplay = userName ? userName : `ID ${leadForm.user_id}`;
+            
+            // Создаем карту для переименования полей
+            const fieldNames = {
+                'phone_number': 'Телефон',
+                'age': 'Возраст',
+                'custom_0': 'Имя',
+                'custom_1': 'Фамилия'
+            };
+            
+            // Форматируем текущую дату и время
+            const now = new Date();
+            const dateTime = now.toLocaleString('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
 
-            let telegramMessage = `📋 <b>Новая заявка в форме VK!</b>\n`;
-            telegramMessage += `<b>Форма:</b> ${escapeHtml(leadForm.form_name || 'Без названия')}\n`;
+            let telegramMessage = `🥳Новая заявка (${dateTime})\n`;
             telegramMessage += `<b>Пользователь:</b> <a href="https://vk.com/id${leadForm.user_id}">${userDisplay}</a>\n`;
-
+            
             if (leadForm.answers && leadForm.answers.length > 0) {
-                telegramMessage += `<b>Данные заявки:</b>\n`;
                 leadForm.answers.forEach(answer => {
+                    // Используем понятное имя поля если доступно, иначе оригинальный ключ
+                    const fieldName = fieldNames[answer.key] || answer.key;
                     const answerText = Array.isArray(answer.answer) 
                         ? answer.answer.join(', ') 
                         : answer.answer;
-                    telegramMessage += `▸ <b>${escapeHtml(answer.key)}</b>: ${escapeHtml(answerText || '—')}\n`;
+                    
+                    telegramMessage += `<b>${escapeHtml(fieldName)}</b>: ${escapeHtml(answerText || '—')}\n`;
                 });
             }
 
@@ -1099,7 +1118,7 @@ case 'message_reply':
             }
         } catch (error) {
             console.error(`Ошибка обработки lead_forms_new:`, error.message);
-            const fallbackMsg = `📋 <b>Новая заявка!\nФорма: ${leadForm.form_name}\nПользователь: ID ${leadForm.user_id}`;
+            const fallbackMsg = `🥳Новая заявка!\nПользователь: ID ${leadForm.user_id}`;
             if (LEAD_CHAT_ID) await sendTelegramMessageWithRetry(LEAD_CHAT_ID, fallbackMsg, { parse_mode: 'HTML' });
         }
     }
