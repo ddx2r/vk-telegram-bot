@@ -45,7 +45,7 @@ const deduplicationCache = new NodeCache({ stdTTL: 60, checkperiod: 120 });
 // Временное хранилище для настроек событий (не сохраняется при перезапусках Railway)
 const eventToggleState = {
 	'lead_forms_new': true,
-    'message_reply': false,
+    'message_reply': true,
     'message_new': true,
     'wall_post_new': true,
     'wall_repost': true,
@@ -968,7 +968,27 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     telegramMessage = `💬 <b>Новый комментарий к товару в VK:</b> (некорректный объект)`;
                 }
                 break;
-
+				
+case 'message_reply':
+    const reply = object;
+    if (reply.text && reply.peer_id) {
+        // Пропускаем автоматические ответы бота
+        if (reply.text.includes("Новая заявка по форме")) {
+            console.log("Пропущен авто-ответ бота о заявке");
+            return res.send('ok');
+        }
+        
+        const userName = await getVkUserName(reply.from_id);
+        const userDisplay = userName ? userName : `ID ${reply.from_id}`;
+        
+        let msg = `↩️ <b>Ответ бота в сообщениях:</b>\n`;
+        msg += `<b>От:</b> <a href="https://vk.com/id${reply.from_id}">${userDisplay}</a>\n`;
+        msg += `<b>Сообщение:</b>\n<i>${escapeHtml(reply.text)}</i>`;
+        
+        await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, msg, { parse_mode: 'HTML' });
+    }
+    break;
+				
             case 'market_comment_edit':
                 const marketCommentEdit = object;
                 if (marketCommentEdit) {
@@ -1034,26 +1054,24 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 break;
 
              case 'group_leave':
-                const leaveEvent = object;
-                if (leaveEvent && leaveEvent.user_id) {
-                    userName = await getVkUserName(leaveEvent.user_id);
-                    const leaveUserDisplay = userName ? userName : `ID ${leaveEvent.user_id}`;
+    const leaveEvent = object;
+    if (leaveEvent && leaveEvent.user_id) {
+        userName = await getVkUserName(leaveEvent.user_id);
+        const leaveUserDisplay = userName ? userName : `ID ${leaveEvent.user_id}`;
 
-                    telegramMessage = `👋 <b>Проваливай!</b>\n😔 Сбежал(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Не будем скучать!`;
-                    
-                    // Отправка в основной чат
-                    await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
-                    
-                    // Дополнительная отправка в чат лидов
-                    if (LEAD_CHAT_ID) {
-                        await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: parseMode });
-                    }
-                } else {
-                    console.warn(`[${new Date().toISOString()}] Получено group_leave без user_id или объекта:`, object);
-                    telegramMessage = `👋 <b>До свидания!</b> (некорректный объект события)`;
-                    await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
-                }
-                break;
+        telegramMessage = `👋 <b>Проваливай!</b>\n😔 Сбежал(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Не будем скучать!`;
+        
+        // Отправляем ТОЛЬКО в чат лидов (если настроен)
+        if (LEAD_CHAT_ID) {
+            await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+        } else {
+            // Если чат лидов не настроен, отправляем в основной чат
+            await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+        }
+    } else {
+        // Обработка ошибки...
+    }
+    break;
 
             case 'lead_forms_new':
     const leadForm = object;
