@@ -44,6 +44,8 @@ const deduplicationCache = new NodeCache({ stdTTL: 60, checkperiod: 120 });
 
 // Временное хранилище для настроек событий (не сохраняется при перезапусках Railway)
 const eventToggleState = {
+	'lead_forms_new': true,
+    'message_reply': false,
     'message_new': true,
     'wall_post_new': true,
     'wall_repost': true,
@@ -1037,7 +1039,7 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                     userName = await getVkUserName(leaveEvent.user_id);
                     const leaveUserDisplay = userName ? userName : `ID ${leaveEvent.user_id}`;
 
-                    telegramMessage = `👋 <b>До свидания!</b>\n😔 Нас покинул(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Будем скучать!`;
+                    telegramMessage = `👋 <b>Проваливай!</b>\n😔 Сбежал(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Не будем скучать!`;
                     
                     // Отправка в основной чат
                     await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
@@ -1054,67 +1056,36 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 break;
 
             case 'lead_forms_new':
-                const leadForm = object;
-                if (leadForm && leadForm.form_id && leadForm.lead_id && leadForm.user_id) {
-                    try {
-                        // Получаем данные заявки через VK API
-                        const response = await axios.get(`https://api.vk.com/method/leadForms.getLead`, {
-                            params: {
-                                group_id: VK_GROUP_ID,
-                                form_id: leadForm.form_id,
-                                lead_id: leadForm.lead_id,
-                                access_token: VK_SERVICE_KEY,
-                                v: '5.131'
-                            },
-                            timeout: 5000
-                        });
+    const leadForm = object;
+    if (leadForm && leadForm.lead_id && leadForm.user_id) {
+        try {
+            const userName = await getVkUserName(leadForm.user_id);
+            const userDisplay = userName ? userName : `ID ${leadForm.user_id}`;
 
-                        if (response.data.error) {
-                            throw new Error(`VK API: ${response.data.error.error_msg}`);
-                        }
+            let telegramMessage = `📋 <b>Новая заявка в форме VK!</b>\n`;
+            telegramMessage += `<b>Форма:</b> ${escapeHtml(leadForm.form_name || 'Без названия')}\n`;
+            telegramMessage += `<b>Пользователь:</b> <a href="https://vk.com/id${leadForm.user_id}">${userDisplay}</a>\n`;
 
-                        const leadData = response.data.response;
-                        userName = await getVkUserName(leadForm.user_id);
-                        const userDisplay = userName ? userName : `ID ${leadForm.user_id}`;
+            if (leadForm.answers && leadForm.answers.length > 0) {
+                telegramMessage += `<b>Данные заявки:</b>\n`;
+                leadForm.answers.forEach(answer => {
+                    const answerText = Array.isArray(answer.answer) 
+                        ? answer.answer.join(', ') 
+                        : answer.answer;
+                    telegramMessage += `▸ <b>${escapeHtml(answer.key)}</b>: ${escapeHtml(answerText || '—')}\n`;
+                });
+            }
 
-                        telegramMessage = `📋 <b>Новая заявка в форме VK!</b>\n`;
-                        telegramMessage += `<b>Форма:</b> ${escapeHtml(leadData.form_name || 'Без названия')}\n`;
-                        telegramMessage += `<b>Пользователь:</b> <a href="https://vk.com/id${leadForm.user_id}">${userDisplay}</a>\n`;
-                        
-                        // Форматируем вопросы и ответы
-                        if (leadData.answers && leadData.answers.length > 0) {
-                            telegramMessage += `<b>Данные заявки:</b>\n`;
-                            leadData.answers.forEach(answer => {
-                                const answerText = Array.isArray(answer.answer) 
-                                    ? answer.answer.join(', ') 
-                                    : answer.answer;
-                                telegramMessage += `▸ <b>${escapeHtml(answer.key)}</b>: ${escapeHtml(answerText || '—')}\n`;
-                            });
-                        }
-
-                        // Отправка только в чат лидов
-                        if (LEAD_CHAT_ID) {
-                            await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: parseMode });
-                        }
-                    } catch (error) {
-                        console.error(`Ошибка при получении данных заявки:`, error.message);
-                        const fallbackMessage = `📋 <b>Новая заявка в форме VK!</b>\n`
-                            + `<b>ID формы:</b> ${leadForm.form_id}\n`
-                            + `<b>ID заявки:</b> ${leadForm.lead_id}\n`
-                            + `<b>Пользователь ID:</b> ${leadForm.user_id}`;
-                        
-                        if (LEAD_CHAT_ID) {
-                            await sendTelegramMessageWithRetry(LEAD_CHAT_ID, fallbackMessage, { parse_mode: parseMode });
-                        }
-                    }
-                } else {
-                    console.warn(`[${new Date().toISOString()}] Получено lead_forms_new без необходимых данных:`, object);
-                    const errorMessage = `📋 <b>Ошибка в заявке VK!</b>\nНекорректные данные формы`;
-                    if (LEAD_CHAT_ID) {
-                        await sendTelegramMessageWithRetry(LEAD_CHAT_ID, errorMessage, { parse_mode: parseMode });
-                    }
-                }
-                break;
+            if (LEAD_CHAT_ID) {
+                await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: 'HTML' });
+            }
+        } catch (error) {
+            console.error(`Ошибка обработки lead_forms_new:`, error.message);
+            const fallbackMsg = `📋 <b>Новая заявка!\nФорма: ${leadForm.form_name}\nПользователь: ID ${leadForm.user_id}`;
+            if (LEAD_CHAT_ID) await sendTelegramMessageWithRetry(LEAD_CHAT_ID, fallbackMsg, { parse_mode: 'HTML' });
+        }
+    }
+    break;
                 
             case 'group_change_photo':
                 const changePhoto = object;
