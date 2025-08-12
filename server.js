@@ -20,11 +20,17 @@ const VK_SECRET_KEY = process.env.VK_SECRET_KEY;
 const VK_SERVICE_KEY = process.env.VK_SERVICE_KEY; // <-- Используем сервисный ключ доступа
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; // Основной чат для пересылки событий
+const LEAD_CHAT_ID = process.env.LEAD_CHAT_ID; // <-- Новый чат для лидов
 
 // Проверка наличия всех необходимых переменных окружения
 if (!VK_GROUP_ID || !VK_SECRET_KEY || !VK_SERVICE_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error('Ошибка: Отсутствуют необходимые переменные окружения. Пожалуйста, убедитесь, что все переменные (VK_GROUP_ID, VK_SECRET_KEY, VK_SERVICE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) установлены.');
     process.exit(1); // Завершаем процесс, если переменные не установлены
+}
+
+// Предупреждение если LEAD_CHAT_ID не задан
+if (!LEAD_CHAT_ID) {
+    console.warn('Внимание: Переменная окружения LEAD_CHAT_ID не установлена. Уведомления для лидов не будут отправляться.');
 }
 
 // Инициализация Telegram бота
@@ -519,6 +525,10 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
         console.log(`[${new Date().toISOString()}] Уведомления для события типа ${type} отключены. Игнорируем.`);
         return res.send('ok');
     }
+
+      try {
+        let telegramMessage = '';
+        let parseMode = 'HTML';
 
     // Логика дедупликации
     const objectId = object?.id || object?.message?.id || object?.post?.id || object?.photo?.id || object?.video?.id || object?.user_id || object?.comment?.id || object?.topic_id || object?.poll_id || object?.item_id || object?.officer_id || object?.admin_id;
@@ -1022,19 +1032,91 @@ app.post('/webhook', async (req, res) => { // Маршрут /webhook
                 }
                 break;
 
-            case 'group_leave':
-                const leaveEvent = object;
-                if (leaveEvent && leaveEvent.user_id) {
-                    userName = await getVkUserName(leaveEvent.user_id);
-                    const leaveUserDisplay = userName ? userName : `ID ${leaveEvent.user_id}`;
+             case 'group_leave':
+            const leaveEvent = object;
+            if (leaveEvent && leaveEvent.user_id) {
+                userName = await getVkUserName(leaveEvent.user_id);
+                const leaveUserDisplay = userName ? userName : `ID ${leaveEvent.user_id}`;
 
-                    telegramMessage = `👋 <b>До свидания!</b>\n😔 Нас покинул(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Будем скучать!`;
-                } else {
-                    console.warn(`[${new Date().toISOString()}] Получено group_leave без user_id или объекта:`, object);
-                    telegramMessage = `👋 <b>До свидания!</b> (некорректный объект события)`;
+                telegramMessage = `👋 <b>До свидания!</b>\n😔 Нас покинул(а) <a href="https://vk.com/id${leaveEvent.user_id}">${leaveUserDisplay}</a>. Будем скучать!`;
+                
+                // Отправка в основной чат
+                await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+                
+                // Дополнительная отправка в чат лидов
+                if (LEAD_CHAT_ID) {
+                    await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: parseMode });
                 }
-                break;
+            } else {
+                console.warn(`[${new Date().toISOString()}] Получено group_leave без user_id или объекта:`, object);
+                telegramMessage = `👋 <b>До свидания!</b> (некорректный объект события)`;
+                await sendTelegramMessageWithRetry(TELEGRAM_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+            }
+            break;
 
+        case 'lead_forms_new':
+            const leadForm = object;
+            if (leadForm && leadForm.form_id && leadForm.lead_id && leadForm.user_id) {
+                try {
+                    // Получаем данные заявки через VK API
+                    const response = await axios.get(`https://api.vk.com/method/leadForms.getLead`, {
+                        params: {
+                            group_id: VK_GROUP_ID,
+                            form_id: leadForm.form_id,
+                            lead_id: leadForm.lead_id,
+                            access_token: VK_SERVICE_KEY,
+                            v: '5.131'
+                        },
+                        timeout: 5000
+                    });
+
+                    if (response.data.error) {
+                        throw new Error(`VK API: ${response.data.error.error_msg}`);
+                    }
+
+                    const leadData = response.data.response;
+                    userName = await getVkUserName(leadForm.user_id);
+                    const userDisplay = userName ? userName : `ID ${leadForm.user_id}`;
+
+                    telegramMessage = `📋 <b>Новая заявка в форме VK!</b>\n`;
+                    telegramMessage += `<b>Форма:</b> ${escapeHtml(leadData.form_name || 'Без названия')}\n`;
+                    telegramMessage += `<b>Пользователь:</b> <a href="https://vk.com/id${leadForm.user_id}">${userDisplay}</a>\n`;
+                    
+                    // Форматируем вопросы и ответы
+                    if (leadData.answers && leadData.answers.length > 0) {
+                        telegramMessage += `<b>Данные заявки:</b>\n`;
+                        leadData.answers.forEach(answer => {
+                            const answerText = Array.isArray(answer.answer) 
+                                ? answer.answer.join(', ') 
+                                : answer.answer;
+                            telegramMessage += `▸ <b>${escapeHtml(answer.key)}</b>: ${escapeHtml(answerText || '—')}\n`;
+                        });
+                    }
+
+                    // Отправка только в чат лидов
+                    if (LEAD_CHAT_ID) {
+                        await sendTelegramMessageWithRetry(LEAD_CHAT_ID, telegramMessage, { parse_mode: parseMode });
+                    }
+                } catch (error) {
+                    console.error(`Ошибка при получении данных заявки:`, error.message);
+                    const fallbackMessage = `📋 <b>Новая заявка в форме VK!</b>\n`
+                        + `<b>ID формы:</b> ${leadForm.form_id}\n`
+                        + `<b>ID заявки:</b> ${leadForm.lead_id}\n`
+                        + `<b>Пользователь ID:</b> ${leadForm.user_id}`;
+                    
+                    if (LEAD_CHAT_ID) {
+                        await sendTelegramMessageWithRetry(LEAD_CHAT_ID, fallbackMessage, { parse_mode: parseMode });
+                    }
+                }
+            } else {
+                console.warn(`[${new Date().toISOString()}] Получено lead_forms_new без необходимых данных:`, object);
+                const errorMessage = `📋 <b>Ошибка в заявке VK!</b>\nНекорректные данные формы`;
+                if (LEAD_CHAT_ID) {
+                    await sendTelegramMessageWithRetry(LEAD_CHAT_ID, errorMessage, { parse_mode: parseMode });
+                }
+            }
+            break;
+                
             case 'group_change_photo':
                 const changePhoto = object;
                 if (changePhoto && changePhoto.user_id) {
