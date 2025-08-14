@@ -133,7 +133,13 @@ async function getVkUserName(userId) {
         
         return `ID: ${userId}`;
     } catch (error) {
-        console.error(`Ошибка при получении имени (ID: ${userId}):`, error.message);
+        console.error(`[${new Date().toISOString()}] Ошибка при получении имени (ID: ${userId}):`, error.response?.data || error.message);
+        
+        // Проверяем конкретную ошибку ключа
+        if (error.response?.data?.error?.error_code === 38) {
+            return `⚠️ [Ошибка ключа VK] ID: ${userId}`;
+        }
+        
         return `ID: ${userId}`;
     }
 }
@@ -168,8 +174,14 @@ async function getVkLikesCount(ownerId, itemId, itemType) {
         console.warn(`[${new Date().toISOString()}] VK API не вернул количество лайков. Ответ:`, response.data);
         return null; // Возвращаем null, если количество не найдено
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] Ошибка при получении количества лайков для объекта ${itemType}:${ownerId}_${itemId}:`, error.response ? error.response.data : error.message);
-        return null; // Возвращаем null при ошибке
+        console.error(`[${new Date().toISOString()}] Ошибка при получении лайков:`, error.response?.data || error.message);
+        
+        // Проверяем конкретную ошибку ключа
+        if (error.response?.data?.error?.error_code === 38) {
+            return -1; // Специальное значение для ошибки ключа
+        }
+        
+        return null;
     }
 }
 
@@ -1213,44 +1225,61 @@ case 'message_reply':
                 }
                 break;
 
-            case 'like_add':
-            case 'like_remove':
-                const isAdd = type === 'like_add';
-                const likeObject = object;
+case 'like_add':
+case 'like_remove':
+    const isAdd = type === 'like_add';
+    const likeObject = object;
 
-                if (likeObject && likeObject.liker_id && likeObject.object_type && likeObject.object_id) {
-                    let ownerId = likeObject.owner_id;
-                    // Если owner_id отсутствует, по умолчанию используем ID группы
-                    if (!ownerId || ownerId === null) {
-                        ownerId = -group_id;
-                        console.warn(`[${new Date().toISOString()}] Отсутствует owner_id в payload события '${type}'. Используем ID группы по умолчанию: ${ownerId}`);
-                    }
+    if (likeObject && likeObject.liker_id && likeObject.object_type && likeObject.object_id) {
+        // Определяем owner_id (если отсутствует, используем ID группы)
+        let ownerId = likeObject.owner_id;
+        if (!ownerId || ownerId === null) {
+            ownerId = -group_id;
+            console.warn(`[${new Date().toISOString()}] Отсутствует owner_id в payload события '${type}'. Используем ID группы по умолчанию: ${ownerId}`);
+        }
 
-                    const objectLink = getObjectLinkForLike(ownerId, likeObject.object_type, likeObject.object_id, likeObject.post_id);
-                    const objectTypeDisplayName = getObjectTypeDisplayName(likeObject.object_type);
+        const objectLink = getObjectLinkForLike(ownerId, likeObject.object_type, likeObject.object_id, likeObject.post_id);
+        const objectTypeDisplayName = getObjectTypeDisplayName(likeObject.object_type);
 
-                    const userName = await getVkUserName(likeObject.liker_id);
-                    const likerDisplay = userName ? userName : `ID ${likeObject.liker_id}`;
+        let likerDisplay;
+        try {
+            const userName = await getVkUserName(likeObject.liker_id);
+            likerDisplay = userName ? userName : `ID ${likeObject.liker_id}`;
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] Ошибка при получении имени лайкнувшего:`, error.message);
+            likerDisplay = `ID ${likeObject.liker_id} (ошибка получения имени)`;
+        }
 
-                    const likesCount = ownerId ? await getVkLikesCount(ownerId, likeObject.object_id, likeObject.object_type) : null;
-                    const likesCountText = likesCount !== null ? ` (Всего: ${likesCount})` : '';
+        let likesCountText = '';
+        try {
+            const likesCount = await getVkLikesCount(ownerId, likeObject.object_id, likeObject.object_type);
+            
+            if (likesCount === -1) {
+                likesCountText = ' (⚠️ Ошибка получения лайков)';
+            } else if (likesCount !== null) {
+                likesCountText = ` (Всего: ${likesCount})`;
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] Ошибка при получении количества лайков:`, error.message);
+            likesCountText = ' (⚠️ Ошибка получения лайков)';
+        }
 
-                    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}</b>\n`;
-                    telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeObject.liker_id}">${likerDisplay}</a>\n`;
-                    telegramMessage += `<b>${isAdd ? 'К' : 'С'}:</b> `;
+        telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}</b>\n`;
+        telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeObject.liker_id}">${likerDisplay}</a>\n`;
+        telegramMessage += `<b>${isAdd ? 'К' : 'С'}:</b> `;
 
-                    if (objectLink) {
-                        telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
-                    } else {
-                        telegramMessage += `${objectTypeDisplayName} ID <code>${likeObject.object_id}</code>`;
-                    }
-                    telegramMessage += likesCountText;
-                } else {
-                    console.warn(`[${new Date().toISOString()}] Получено событие '${type}' без необходимых полей (liker_id, object_type, object_id):`, likeObject);
-                    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}:</b> (некорректный объект)`;
-                }
-                break;
-
+        if (objectLink) {
+            telegramMessage += `<a href="${objectLink}">${objectTypeDisplayName}</a>`;
+        } else {
+            telegramMessage += `${objectTypeDisplayName} ID <code>${likeObject.object_id}</code>`;
+        }
+        telegramMessage += likesCountText;
+    } else {
+        console.warn(`[${new Date().toISOString()}] Получено событие '${type}' без необходимых полей:`, likeObject);
+        telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}:</b> (некорректный объект)`;
+    }
+    break;
+				
             default:
                 console.log(`[${new Date().toISOString()}] Необработанный тип события VK: ${type}. Полный объект:`, JSON.stringify(object));
                 telegramMessage = `❓ <b>Неизвестное или необработанное событие VK:</b>\nТип: <code>${escapeHtml(type)}</code>\n<pre>${escapeHtml(JSON.stringify(object, null, 2).substring(0, 1000) + (JSON.stringify(object, null, 2).length > 1000 ? '...' : ''))}</pre>`;
