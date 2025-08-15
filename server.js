@@ -78,6 +78,8 @@ const eventToggleState = {
     'user_unblock': true,
     'like_add': true,
     'like_remove': true,
+	'message_allow': true,
+    'message_deny': true,
 };
 
 // Вспомогательная функция для экранирования HTML-сущностей
@@ -1132,6 +1134,38 @@ case 'message_reply':
             console.error(`Ошибка обработки lead_forms_new:`, error.message);
             const fallbackMsg = `🥳Новая заявка!\nПользователь: ID ${leadForm.user_id}`;
             if (LEAD_CHAT_ID) await sendTelegramMessageWithRetry(LEAD_CHAT_ID, fallbackMsg, { parse_mode: 'HTML' });
+        }
+    }
+    break;
+
+				case 'message_allow':
+    const allowEvent = object;
+    if (allowEvent && allowEvent.user_id) {
+        try {
+            const userName = await getVkUserName(allowEvent.user_id);
+            const userDisplay = userName ? userName : `ID ${allowEvent.user_id}`;
+            
+            telegramMessage = `✅ <b>Пользователь разрешил сообщения:</b>\n`;
+            telegramMessage += `<a href="https://vk.com/id${allowEvent.user_id}">${userDisplay}</a> теперь может получать сообщения от сообщества`;
+        } catch (error) {
+            console.error(`Ошибка обработки message_allow:`, error.message);
+            telegramMessage = `✅ <b>Пользователь разрешил сообщения:</b>\nID: ${allowEvent.user_id}`;
+        }
+    }
+    break;
+
+case 'message_deny':
+    const denyEvent = object;
+    if (denyEvent && denyEvent.user_id) {
+        try {
+            const userName = await getVkUserName(denyEvent.user_id);
+            const userDisplay = userName ? userName : `ID ${denyEvent.user_id}`;
+            
+            telegramMessage = `❌ <b>Пользователь запретил сообщения:</b>\n`;
+            telegramMessage += `<a href="https://vk.com/id${denyEvent.user_id}">${userDisplay}</a> больше не будет получать сообщения от сообщества`;
+        } catch (error) {
+            console.error(`Ошибка обработки message_deny:`, error.message);
+            telegramMessage = `❌ <b>Пользователь запретил сообщения:</b>\nID: ${denyEvent.user_id}`;
         }
     }
     break;
