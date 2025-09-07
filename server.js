@@ -19,9 +19,14 @@ const { handleVkEvent } = require('./src/vk/events');
 // Логгер Supabase
 const { withRequestId, logMiddlewareTelegram, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
 
-const app = express();
 app.use(withRequestId());
-app.use(bodyParser.json());
+
+app.post('/telegram', logMiddlewareTelegram(), async (req, res) => { /* ... */ });
+app.post('/webhook',  logMiddlewareVK(),      async (req, res) => { /* ... */ });
+
+// при старте:
+logger.info({ source: 'system', event: 'boot', summary: `Bot v${BOT_VERSION} started`, payload: { port: PORT } });
+
 
 // глобальный аптайм
 global.__BOT_STARTED_AT = new Date();
