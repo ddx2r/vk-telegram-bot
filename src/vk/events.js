@@ -251,7 +251,7 @@ async function handleVkEvent({ type, object }) {
       const by = ev.self ? 'самостоятельно' : (admin ? `модератором <a href="https://vk.com/id${ev.admin_id}">${admin}</a>` : '—');
       msg = `🔴 <b>Покинул(а) сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
       // в некоторых проектах выходы шлют в отдельный чат лидов — если нужно, раскомментируй:
-      // if (LEAD_CHAT_ID) { await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' }); msg = ''; }
+      if (LEAD_CHAT_ID) { await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' }); msg = ''; }
       break;
     }
 
