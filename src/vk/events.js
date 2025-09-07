@@ -8,16 +8,43 @@ const { VK_GROUP_ID, VK_SERVICE_KEY, LEAD_CHAT_ID } = require('../config');
 
 // --- Утилиты для ссылок/названий ---
 function getObjectTypeDisplayName(type) {
-  switch (type) {
-    case 'post': return 'посту';
-    case 'photo': return 'фотографии';
-    case 'video': return 'видео';
-    case 'comment': return 'комментарию';
-    case 'topic': return 'обсуждению';
-    case 'market': return 'товару';
-    default: return `объекту типа <code>${escapeHtml(type)}</code>`;
+  // Нормализуем (VK иногда шлёт в разных регистрах)
+  const t = String(type || '').toLowerCase();
+
+  switch (t) {
+    // Базовые
+    case 'post':            return 'посту';
+    case 'comment':         return 'комментарию';
+    case 'photo':           return 'фотографии';
+    case 'video':           return 'видео';
+    case 'audio':           return 'аудиозаписи';
+    case 'note':            return 'заметке';
+    case 'market':          return 'товару';
+    case 'topic':           return 'обсуждению';
+
+    // Комментарии к сущностям
+    case 'photo_comment':   return 'комментарию к фото';
+    case 'video_comment':   return 'комментарию к видео';
+    case 'topic_comment':   return 'комментарию в обсуждении';
+    case 'market_comment':  return 'комментарию к товару';
+
+    // Новые/редкие типы
+    case 'clip':            return 'клипу';
+    case 'story':           return 'истории';
+    case 'podcast':         return 'подкасту';
+    case 'article':         return 'статье';
+    case 'album':           return 'альбому';
+    case 'market_album':    return 'разделу товаров';
+    case 'sitepage':        return 'странице сайта';
+    case 'app':             return 'приложению';
+    case 'poll':            return 'опросу';
+    case 'event':           return 'событию';
+
+    default:
+      return `объекту типа <code>${escapeHtml(String(type))}</code>`;
   }
 }
+
 
 function getObjectLinkForLike(ownerId, objectType, objectId, postId) {
   if (objectType === 'comment' && postId) {
