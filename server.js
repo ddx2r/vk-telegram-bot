@@ -16,7 +16,11 @@ const { registerCommands } = require('./src/commands');
 const { shouldProcessEvent, rememberEvent } = require('./src/vk/dedup');
 const { handleVkEvent } = require('./src/vk/events');
 
+// Логгер Supabase
+const { withRequestId, logMiddlewareTelegram, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
+
 const app = express();
+app.use(withRequestId());
 app.use(bodyParser.json());
 
 // глобальный аптайм
@@ -32,7 +36,7 @@ app.get('/health', (req, res) => {
 });
 
 // VK webhook
-app.post('/webhook', async (req, res) => {
+app.post('/webhook', logMiddlewareVK(), async (req, res) => {
   const { type, object, group_id, secret } = req.body || {};
   console.log(`[${new Date().toISOString()}] VK событие: ${type}`);
 
@@ -79,6 +83,6 @@ app.listen(PORT, async () => {
       `Время: ${new Date().toLocaleString('ru-RU')}`,
       `Основной чат: ${TELEGRAM_CHAT_ID}`
     ];
-    await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'));
+    await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'));ф
   }
 });
