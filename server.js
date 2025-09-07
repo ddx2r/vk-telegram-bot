@@ -50,7 +50,7 @@ async function vkWebhookHandler(req, res) {
   const body = req.body || {};
   const { type, object, group_id, secret } = body;
 
-  // Если пришло что-то не похоже на VK — просто логируем и отвечаем ok
+  // Если пришло что-то не похоже на VK — логируем и отвечаем ok
   if (!type && !object) {
     logger.warn({
       source: 'vk',
