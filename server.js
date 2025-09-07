@@ -6,7 +6,6 @@ const bodyParser = require('body-parser');
 const {
   VK_GROUP_ID,
   VK_SECRET_KEY,
-  TELEGRAM_CHAT_ID,
   DEBUG_CHAT_ID,
   BOT_VERSION
 } = require('./src/config');
@@ -20,16 +19,17 @@ const { handleVkEvent } = require('./src/vk/events');
 const { withRequestId, logMiddlewareTelegram, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
 
 const app = express();
-app.use(bodyParser.json());
+// VK шлёт JSON; увеличим лимит на всякий случай
+app.use(bodyParser.json({ limit: '2mb' }));
 app.use(withRequestId());
 
-// глобальный аптайм
+// аптайм
 global.__BOT_STARTED_AT = new Date();
 
-// Регистрация команд
+// Регистрация команд тг
 registerCommands(bot);
 
-// Health
+// health
 app.get('/health', (req, res) => {
   const up = Math.floor((Date.now() - (global.__BOT_STARTED_AT?.getTime() || Date.now())) / 1000);
   res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString() });
@@ -45,33 +45,57 @@ app.post('/telegram', logMiddlewareTelegram(), async (req, res) => {
   }
 });
 
-// VK webhook
-app.post('/webhook', logMiddlewareVK(), async (req, res) => {
-  const { type, object, group_id, secret } = req.body || {};
-  if (group_id != VK_GROUP_ID || secret !== VK_SECRET_KEY) {
-    logError('vk', 'auth', new Error('bad secret or group id'), { payload: req.body });
+// Единая функция проверки VK + обработка
+async function vkWebhookHandler(req, res) {
+  const body = req.body || {};
+  const { type, object, group_id, secret } = body;
+
+  // Если пришло что-то не похоже на VK — просто логируем и отвечаем ok
+  if (!type && !object) {
+    logger.warn({
+      source: 'vk',
+      event: 'unknown_payload',
+      request_id: req.requestId,
+      summary: 'VK payload without type/object',
+      payload: body
+    });
+    return res.status(200).send('ok');
+  }
+
+  // Безопасность
+  if (String(group_id) != String(VK_GROUP_ID) || (VK_SECRET_KEY && secret !== VK_SECRET_KEY)) {
+    logError('vk', 'auth', new Error('bad secret or group id'), { payload: body });
     return res.status(403).end('forbidden');
   }
-  if (type === 'confirmation') {
-    // VK confirmation string (укажи реальную строку подтверждения)
-    return res.status(200).send(process.env.VK_CONFIRMATION_STRING || 'confirmation-code');
-  }
-  try {
-    if (shouldProcessEvent(req.body)) {
-      await handleVkEvent(type, object);
-      rememberEvent(req.body);
-    }
-    res.status(200).send('ok');
-  } catch (err) {
-    logError('vk', type || 'webhook', err, { payload: req.body });
-    res.status(500).end('error');
-  }
-});
 
-// Старт сервера
+  // Подтверждение сервера
+  if (type === 'confirmation') {
+    const code = process.env.VK_CONFIRMATION_STRING || 'confirmation-code';
+    // VK требует обычную строку, не JSON
+    return res.status(200).send(code);
+  }
+
+  try {
+    // Идемпотентность на случай ретраев
+    if (shouldProcessEvent(body)) {
+      await handleVkEvent(type, object, { full: body, requestId: req.requestId });
+      rememberEvent(body);
+    }
+    return res.status(200).send('ok');
+  } catch (err) {
+    logError('vk', type || 'webhook', err, { payload: body });
+    return res.status(500).end('error');
+  }
+}
+
+// VK webhook (новый путь)
+app.post('/vk', logMiddlewareVK(), vkWebhookHandler);
+// Оставим и старый путь для обратной совместимости
+app.post('/webhook', logMiddlewareVK(), vkWebhookHandler);
+
+// Старт
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  // Запишем событие в Supabase
   logger.info({
     source: 'system',
     event: 'boot',
@@ -79,7 +103,6 @@ app.listen(PORT, async () => {
     payload: { port: PORT }
   });
 
-  // Отправим уведомление в Telegram
   if (DEBUG_CHAT_ID) {
     try {
       await sendTelegramMessageWithRetry(
