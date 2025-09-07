@@ -583,7 +583,77 @@ async function handleVkEvent({ type, object }) {
     }
 
     // --- Fallback
-    default: {
+        // --- Присоединение/выход из сообщества (красивые подписи)
+    case 'group_join': {
+      const ev = object;
+      const user = await getVkUserName(ev.user_id);
+      const kind = String(ev.join_type || '').toLowerCase();
+      const kindLabel = ({
+        approved: 'заявка одобрена',
+        request: 'подан запрос на вступление',
+        accepted: 'вступил(а)',
+        joined: 'вступил(а)'
+      })[kind] || 'вступил(а)';
+      msg = `🟢 <b>${escapeHtml(kindLabel)} в сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>`;
+      break;
+    }
+    case 'group_leave': {
+      const ev = object;
+      const user = await getVkUserName(ev.user_id);
+      const admin = ev.admin_id ? await getVkUserName(ev.admin_id) : null;
+      const by = ev.self ? 'самостоятельно' : (admin ? `модератором <a href="https://vk.com/id${ev.admin_id}">${admin}</a>` : '—');
+      msg = `🔴 <b>Покинул(а) сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
+      break;
+    }
+
+    // --- Комментарии к фото/видео/товарам/обсуждениям (единый стиль)
+    case 'photo_comment_new': {
+      const c = object;
+      const author = await getVkUserName(c.from_id);
+      msg = `🖼️ <b>Новый комментарий к фото</b>\n<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n<b>Текст:</b> <i>${escapeHtml(c.text || '')}</i>`;
+      break;
+    }
+    case 'video_comment_new': {
+      const c = object;
+      const author = await getVkUserName(c.from_id);
+      msg = `🎬 <b>Новый комментарий к видео</b>\n<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n<b>Текст:</b> <i>${escapeHtml(c.text || '')}</i>`;
+      break;
+    }
+    case 'market_comment_new': {
+      const c = object;
+      const author = await getVkUserName(c.from_id);
+      msg = `🛒 <b>Комментарий к товару</b>\n<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n<b>Текст:</b> <i>${escapeHtml(c.text || '')}</i>`;
+      break;
+    }
+    case 'topic_comment_new': {
+      const c = object;
+      const author = await getVkUserName(c.from_id);
+      msg = `🗂️ <b>Комментарий в обсуждении</b>\n<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n<b>Текст:</b> <i>${escapeHtml(c.text || '')}</i>`;
+      break;
+    }
+
+    // --- Новые фото/видео (краткие карточки)
+    case 'photo_new': {
+      const ev = object;
+      const author = await getVkUserName(ev.user_id || ev.owner_id);
+      msg = `🖼️ <b>Добавлена фотография</b>\n<b>Автор:</b> <a href="https://vk.com/id${ev.user_id || ev.owner_id}">${author}</a>`;
+      break;
+    }
+    case 'video_new': {
+      const ev = object;
+      const author = await getVkUserName(ev.owner_id);
+      msg = `🎬 <b>Добавлено видео</b>\n<b>Автор:</b> <a href="https://vk.com/id${ev.owner_id}">${author}</a>`;
+      break;
+    }
+
+    // --- Обсуждения (новая запись)
+    case 'board_post_new': {
+      const ev = object;
+      const author = await getVkUserName(ev.from_id);
+      msg = `📌 <b>Новая запись в обсуждении</b>\n<b>Автор:</b> <a href="https://vk.com/id${ev.from_id}">${author}</a>\n<i>${escapeHtml(ev.text || '')}</i>`;
+      break;
+    }
+default: {
       msg = `❓ <b>Событие VK:</b>\nТип: <code>${escapeHtml(type)}</code>\n<pre>${escapeHtml(JSON.stringify(object, null, 2))}</pre>`;
       break;
     }
