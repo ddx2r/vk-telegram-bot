@@ -6,7 +6,6 @@ const bodyParser = require('body-parser');
 const {
   VK_GROUP_ID,
   VK_SECRET_KEY,
-  TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   DEBUG_CHAT_ID,
   BOT_VERSION
@@ -77,7 +76,8 @@ app.listen(PORT, async () => {
       '🟢 Система запущена!',
       `Сообщество: https://vk.com/public${VK_GROUP_ID}`,
       `Версия: ${BOT_VERSION}`,
-      `Время: ${new Date().toLocaleString('ru-RU')}`
+      `Время: ${new Date().toLocaleString('ru-RU')}`,
+      `Основной чат: ${TELEGRAM_CHAT_ID}`
     ];
     await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'));
   }
