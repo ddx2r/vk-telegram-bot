@@ -7,7 +7,8 @@ const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 function buildKey({ type, object, group_id }) {
   const objectId =
     object?.id || object?.comment_id || object?.video_id || object?.photo_id ||
-    object?.post_id || object?.message?.id || object?.user_id;
+    object?.post_id || object?.message?.id || object?.user_id || object?.item_id ||
+    object?.topic_id || object?.poll_id;
 
   const payload = {
     type,
