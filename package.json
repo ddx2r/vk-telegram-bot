@@ -16,7 +16,8 @@
   "author": "Your Name",
   "license": "MIT",
   "engines": { "node": ">=18" },
-  "dependencies": {
+"dependencies": {
+  "@supabase/supabase-js": "^2.0.0",
     "axios": "^1.7.2",
     "body-parser": "^1.20.2",
     "express": "^4.19.2",
