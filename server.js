@@ -6,6 +6,7 @@ const bodyParser = require('body-parser');
 const {
   VK_GROUP_ID,
   VK_SECRET_KEY,
+  TELEGRAM_CHAT_ID,
   DEBUG_CHAT_ID,
   BOT_VERSION
 } = require('./src/config');
@@ -19,100 +20,71 @@ const { handleVkEvent } = require('./src/vk/events');
 const { withRequestId, logMiddlewareTelegram, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
 
 const app = express();
-// VK шлёт JSON; увеличим лимит на всякий случай
-app.use(bodyParser.json({ limit: '2mb' }));
-app.use(withRequestId());
 
-// аптайм
+app.use(withRequestId());
+app.use(bodyParser.json());
+
+// глобальный аптайм
 global.__BOT_STARTED_AT = new Date();
 
-// Регистрация команд тг
+// Регистрация команд
 registerCommands(bot);
 
-// health
+// Health
 app.get('/health', (req, res) => {
   const up = Math.floor((Date.now() - (global.__BOT_STARTED_AT?.getTime() || Date.now())) / 1000);
   res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString() });
 });
 
-// Telegram webhook
-app.post('/telegram', logMiddlewareTelegram(), async (req, res) => {
+// VK webhook
+app.post('/webhook', logMiddlewareVK(), async (req, res) => {
+  const { type, object, group_id, secret } = req.body || {};
+  console.log(`[${new Date().toISOString()}] VK событие: ${type}`);
+
+  // Проверка секрета
+  if (secret !== VK_SECRET_KEY) return res.status(403).send('Forbidden');
+
+  // confirmation/шум — быстрый ACK
+  if (type === 'confirmation' || type === 'typing_status' || type === 'message_read') {
+    return res.send('ok');
+  }
+
+  // Быстрый ACK, чтобы VK не ретраил
+  res.send('ok');
+
   try {
-    await bot.handleUpdate(req.body, res);
-  } catch (err) {
-    logError('telegram', 'webhook', err, { payload: req.body });
-    res.sendStatus(500);
+    // Дедуп
+    if (!shouldProcessEvent({ type, object, group_id })) {
+      console.log('Дубликат — пропуск.');
+      return;
+    }
+    rememberEvent({ type, object, group_id });
+
+    // Обработка события
+    await handleVkEvent({ type, object });
+
+  } catch (e) {
+    console.error('Ошибка обработки VK-события:', e.message);
+    if (DEBUG_CHAT_ID) {
+      await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, `❌ Ошибка: ${e.message}`);
+    }
   }
 });
 
-// Единая функция проверки VK + обработка
-async function vkWebhookHandler(req, res) {
-  const body = req.body || {};
-  const { type, object, group_id, secret } = body;
-
-  // Если пришло что-то не похоже на VK — логируем и отвечаем ok
-  if (!type && !object) {
-    logger.warn({
-      source: 'vk',
-      event: 'unknown_payload',
-      request_id: req.requestId,
-      summary: 'VK payload without type/object',
-      payload: body
-    });
-    return res.status(200).send('ok');
-  }
-
-  // Безопасность
-  if (String(group_id) != String(VK_GROUP_ID) || (VK_SECRET_KEY && secret !== VK_SECRET_KEY)) {
-    logError('vk', 'auth', new Error('bad secret or group id'), { payload: body });
-    return res.status(403).end('forbidden');
-  }
-
-  // Подтверждение сервера
-  if (type === 'confirmation') {
-    const code = process.env.VK_CONFIRMATION_STRING || 'confirmation-code';
-    // VK требует обычную строку, не JSON
-    return res.status(200).send(code);
-  }
-
-  try {
-    // Идемпотентность на случай ретраев
-    if (shouldProcessEvent(body)) {
-      await handleVkEvent(type, object, { full: body, requestId: req.requestId });
-      rememberEvent(body);
-    }
-    return res.status(200).send('ok');
-  } catch (err) {
-    logError('vk', type || 'webhook', err, { payload: body });
-    return res.status(500).end('error');
-  }
-}
-
-// VK webhook (новый путь)
-app.post('/vk', logMiddlewareVK(), vkWebhookHandler);
-// Оставим и старый путь для обратной совместимости
-app.post('/webhook', logMiddlewareVK(), vkWebhookHandler);
-
-// Старт
+// Запуск
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  logger.info({
-    source: 'system',
-    event: 'boot',
-    summary: `Bot v${BOT_VERSION} started`,
-    payload: { port: PORT }
-  });
-
+    logger.info({ source: 'system', event: 'boot', summary: `Bot v${BOT_VERSION} started`, payload: { port: PORT } });
+console.log(`[${new Date().toISOString()}] Сервер на порту ${PORT}`);
+  // стартовое сообщение в DEBUG
   if (DEBUG_CHAT_ID) {
-    try {
-      await sendTelegramMessageWithRetry(
-        DEBUG_CHAT_ID,
-        `🟢 Бот успешно запущен!\nВерсия: ${BOT_VERSION}\nПорт: ${PORT}\nВремя: ${new Date().toISOString()}`
-      );
-    } catch (err) {
-      logError('system', 'notify_startup', err, { chat_id: DEBUG_CHAT_ID });
-    }
+    const lines = [
+      '🟢 Система запущена!',
+      `Сообщество: https://vk.com/public${VK_GROUP_ID}`,
+      `Версия: ${BOT_VERSION}`,
+      `Время: ${new Date().toLocaleString('ru-RU')}`,
+      `Основной чат: ${TELEGRAM_CHAT_ID}`
+    ];
+    await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'));
   }
-
-  console.log(`[server] Bot v${BOT_VERSION} listening on ${PORT}`);
 });
