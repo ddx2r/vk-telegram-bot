@@ -81,3 +81,15 @@ function setMainChat(id) {
 }
 
 module.exports = { state, isAdmin, setMainChat };
+// Возвращает true для всех событий, КРОМЕ явно отключённых (=== false)
+function shouldDeliver(type) {
+  try {
+    const m = state.eventToggleState || {};
+    if (Object.prototype.hasOwnProperty.call(m, type) && m[type] === false) return false;
+    return true;
+  } catch (_) {
+    return true;
+  }
+}
+
+module.exports = { state, shouldDeliver };
