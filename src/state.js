@@ -5,7 +5,7 @@ const { TELEGRAM_CHAT_ID, ADMIN_USER_IDS } = require('./config');
 const state = {
   CURRENT_MAIN_CHAT_ID: TELEGRAM_CHAT_ID,
 
-  // Включаем максимум известных типов событий VK (можно дополнять)
+  // Максимально полный набор известных типов VK
   eventToggleState: {
     // Сообщения
     message_new: true,
