@@ -6,9 +6,8 @@ const { sendTelegramMessageWithRetry } = require('../telegram');
 const { escapeHtml, getVkUserName } = require('../utils');
 const { VK_GROUP_ID, VK_SERVICE_KEY, LEAD_CHAT_ID } = require('../config');
 
-// --- Утилиты для ссылок/названий ---
+// -------- Человекочитаемые названия типов --------
 function getObjectTypeDisplayName(type) {
-  // Нормализуем (VK иногда шлёт в разных регистрах)
   const t = String(type || '').toLowerCase();
 
   switch (t) {
@@ -45,19 +44,101 @@ function getObjectTypeDisplayName(type) {
   }
 }
 
+// -------- Построение ссылок --------
+function getObjectLinkForLike(ownerId, objectType, objectId, postId, extras = {}) {
+  const t = String(objectType || '').toLowerCase();
 
-function getObjectLinkForLike(ownerId, objectType, objectId, postId) {
-  if (objectType === 'comment' && postId) {
+  // Комментарий к посту, если известен postId
+  if (t === 'comment' && postId) {
     return `https://vk.com/wall${ownerId}_${postId}?reply=${objectId}`;
   }
-  switch (objectType) {
-    case 'post': return `https://vk.com/wall${ownerId}_${objectId}`;
-    case 'photo': return `https://vk.com/photo${ownerId}_${objectId}`;
-    case 'video': return `https://vk.com/video${ownerId}_${objectId}`;
-    case 'comment': return `https://vk.com/id${ownerId}?w=wall${ownerId}_${objectId}`;
-    case 'topic': return `https://vk.com/topic-${VK_GROUP_ID}_${objectId}`;
-    case 'market': return `https://vk.com/market-${ownerId}?w=product-${ownerId}_${objectId}`;
-    default: return null;
+
+  switch (t) {
+    case 'post':
+      return `https://vk.com/wall${ownerId}_${objectId}`;
+
+    case 'photo':
+      return `https://vk.com/photo${ownerId}_${objectId}`;
+
+    case 'video':
+      return `https://vk.com/video${ownerId}_${objectId}`;
+
+    case 'audio':
+      return `https://vk.com/audio?z=audio${ownerId}_${objectId}`;
+
+    case 'note':
+      return `https://vk.com/note${ownerId}_${objectId}`;
+
+    case 'market':
+      return `https://vk.com/market-${ownerId}?w=product-${ownerId}_${objectId}`;
+
+    case 'topic':
+      if (String(ownerId).startsWith('-')) {
+        return `https://vk.com/topic${ownerId}_${objectId}`;
+      }
+      return null;
+
+    case 'photo_comment': {
+      const { parent_photo_id } = extras || {};
+      if (parent_photo_id) return `https://vk.com/photo${ownerId}_${parent_photo_id}?reply=${objectId}`;
+      return null;
+    }
+    case 'video_comment': {
+      const { parent_video_id } = extras || {};
+      if (parent_video_id) return `https://vk.com/video${ownerId}_${parent_video_id}?reply=${objectId}`;
+      return null;
+    }
+    case 'topic_comment': {
+      const { parent_topic_id } = extras || {};
+      if (String(ownerId).startsWith('-') && parent_topic_id) {
+        return `https://vk.com/topic${ownerId}_${parent_topic_id}?post=${objectId}`;
+      }
+      return null;
+    }
+    case 'market_comment': {
+      const { parent_item_id } = extras || {};
+      if (parent_item_id) {
+        return `https://vk.com/market-${ownerId}?w=product-${ownerId}_${parent_item_id}/comment${objectId}`;
+      }
+      return null;
+    }
+
+    case 'clip':
+      return `https://vk.com/clip${ownerId}_${objectId}`;
+
+    case 'story':
+      // Нет стабильного URL на конкретную историю
+      return `https://vk.com/id${String(ownerId).replace('-', '')}`;
+
+    case 'podcast':
+      if (String(ownerId).startsWith('-')) {
+        return `https://vk.com/podcasts-${String(ownerId).replace('-', '')}`;
+      }
+      return null;
+
+    case 'article':
+      return null;
+
+    case 'album':
+      return `https://vk.com/album${ownerId}_${objectId}`;
+
+    case 'market_album':
+      return `https://vk.com/market-${ownerId}?section=${objectId}`;
+
+    case 'sitepage':
+      return null;
+
+    case 'app':
+      return `https://vk.com/app${objectId}`;
+
+    case 'poll':
+      return null;
+
+    case 'event':
+      return `https://vk.com/event${String(ownerId).replace('-', '')}`;
+
+    default:
+      return null;
   }
 }
 
@@ -120,7 +201,7 @@ function summarizeAttachments(attachments = []) {
   return lines.join('\n');
 }
 
-// Можно дополнить получением общего числа лайков (упрощённо без ошибок)
+// Счётчик лайков (где API поддерживает)
 async function tryGetLikesCount(ownerId, itemId, type) {
   try {
     const r = await axios.get('https://api.vk.com/method/likes.getList', {
@@ -151,7 +232,7 @@ async function handleVkEvent({ type, object }) {
     }
     case 'message_reply': {
       const r = object;
-      if (r?.text?.includes('Новая заявка по форме')) break; // фильтр автоответа из твоего кода
+      if (r?.text?.includes('Новая заявка по форме')) break;
       const user = await getVkUserName(r.from_id);
       msg = `↩️ <b>Ответ в сообщениях:</b>\n<b>От:</b> <a href="https://vk.com/id${r.from_id}">${user}</a>\n` +
             `<b>Сообщение:</b>\n<i>${escapeHtml(r.text || '')}</i>`;
@@ -379,10 +460,9 @@ async function handleVkEvent({ type, object }) {
       const l = object;
       const user = await getVkUserName(l.user_id);
       msg = `👋 <b>Покинул(а) сообщество:</b>\n<a href="https://vk.com/id${l.user_id}">${user}</a>`;
-      // как в твоём коде — можно слать в LEAD_CHAT_ID, если задан
       if (LEAD_CHAT_ID) {
         await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' });
-        msg = ''; // чтобы не дублировать в основной чат
+        msg = '';
       }
       break;
     }
@@ -437,25 +517,46 @@ async function handleVkEvent({ type, object }) {
       break;
     }
 
-    // --- Лайки
+    // --- Лайки (улучшенные подписи и ссылки)
     case 'like_add':
     case 'like_remove': {
       const ev = object;
+
+      // owner_id может отсутствовать — берём ID сообщества как fallback
       let ownerId = ev.owner_id;
-      if (!ownerId) ownerId = -Number(VK_GROUP_ID); // fallback: ID сообщества отрицательный
+      if (!ownerId) ownerId = -Number(VK_GROUP_ID);
 
       const liker = await getVkUserName(ev.liker_id);
-      const link = getObjectLinkForLike(ownerId, ev.object_type, ev.object_id, ev.post_id);
       const typeText = getObjectTypeDisplayName(ev.object_type);
 
-      // (опционально) общее количество лайков
-      let total = null;
-      try { total = await tryGetLikesCount(ownerId, ev.object_id, ev.object_type); } catch {}
+      const link = getObjectLinkForLike(
+        ownerId,
+        ev.object_type,
+        ev.object_id,
+        ev.post_id,
+        {
+          parent_photo_id: ev.photo_id,
+          parent_video_id: ev.video_id,
+          parent_topic_id: ev.topic_id,
+          parent_item_id: ev.item_id
+        }
+      );
 
-      msg = `<b>${type === 'like_add' ? '❤️ Новый лайк' : '💔 Лайк удалён'}</b>\n` +
-            `<b>От:</b> <a href="https://vk.com/id${ev.liker_id}">${liker}</a>\n` +
-            `<b>${type === 'like_add' ? 'К' : 'С'}:</b> ${link ? `<a href="${link}">${typeText}</a>` : typeText}` +
-            (total != null ? ` (всего: ${total})` : '');
+      let total = null;
+      const unsafeTypes = ['clip','story','article','sitepage','podcast','app'];
+      if (!unsafeTypes.includes(String(ev.object_type || '').toLowerCase())) {
+        try { total = await tryGetLikesCount(ownerId, ev.object_id, ev.object_type); } catch {}
+      }
+
+      msg = `<b>${type === 'like_add' ? '❤️ Новый лайк в VK' : '💔 Лайк удалён в VK'}</b>\n`;
+      msg += `<b>От:</b> <a href="https://vk.com/id${ev.liker_id}">${liker}</a>\n`;
+      msg += `<b>${type === 'like_add' ? 'К' : 'С'}:</b> `;
+      if (link) {
+        msg += `<a href="${link}">${typeText}</a>`;
+      } else {
+        msg += `${typeText} ID <code>${ev.object_id}</code>`;
+      }
+      if (total != null) msg += ` (Всего: ${total})`;
       break;
     }
 
@@ -473,7 +574,6 @@ async function handleVkEvent({ type, object }) {
           text += `\n<b>${escapeHtml(label)}:</b> ${escapeHtml(val || '—')}`;
         }
       }
-      // как и раньше — в LEAD_CHAT_ID, если задан
       if (LEAD_CHAT_ID) {
         await sendTelegramMessageWithRetry(LEAD_CHAT_ID, text, { parse_mode: 'HTML' });
         text = '';
@@ -482,7 +582,7 @@ async function handleVkEvent({ type, object }) {
       break;
     }
 
-    // --- Fallback: любой неизвестный тип тоже уходит!
+    // --- Fallback
     default: {
       msg = `❓ <b>Событие VK:</b>\nТип: <code>${escapeHtml(type)}</code>\n<pre>${escapeHtml(JSON.stringify(object, null, 2))}</pre>`;
       break;
