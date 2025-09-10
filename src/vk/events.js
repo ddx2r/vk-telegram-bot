@@ -202,7 +202,7 @@ async function handleVkEvent({ type, object }) {
         total = await tryGetLikesCount(ownerId, ev.object_id, ev.object_type);
       } catch {}
 
-      msg  = `<b>${type === 'like_add' ? '❤️ Новый лайк в VK' : '💔 Лайк удалён в VK'}</b>\n`;
+      msg  = `<b>${type === 'like_add' ? '❤️' : '💔'}</b>\n`;
       msg += `<b>От:</b> <a href="https://vk.com/id${ev.liker_id}">${liker}</a>\n`;
       msg += `<b>${type === 'like_add' ? 'К' : 'С'}:</b> `;
 
@@ -237,10 +237,10 @@ async function handleVkEvent({ type, object }) {
       const kindLabel = ({
         approved: 'заявка одобрена',
         request: 'подан запрос на вступление',
-        accepted: 'вступил(а)',
+        accepted: '➕',
         joined: 'вступил(а)'
       })[kind] || 'вступил(а)';
-      msg = `🟢 <b>${escapeHtml(kindLabel)} в сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>`;
+      msg = `✅ <b>${escapeHtml(kindLabel)} </b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>`;
       break;
     }
 
@@ -249,7 +249,7 @@ async function handleVkEvent({ type, object }) {
       const user = await getVkUserName(ev.user_id);
       const admin = ev.admin_id ? await getVkUserName(ev.admin_id) : null;
       const by = ev.self ? 'самостоятельно' : (admin ? `модератором <a href="https://vk.com/id${ev.admin_id}">${admin}</a>` : '—');
-      msg = `🔴 <b>Покинул(а) сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
+      msg = `❌ <b></b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
       // в некоторых проектах выходы шлют в отдельный чат лидов — если нужно, раскомментируй:
       if (LEAD_CHAT_ID) { await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' }); msg = ''; }
       break;
