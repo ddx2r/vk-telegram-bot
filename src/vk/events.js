@@ -80,7 +80,7 @@ function buildObjectLink(ownerId, objectType, objectId, postId) {
 /** Преобразование типов к допустимым для likes.getList */
 function toLikesApiType(objectType) {
   const t = String(objectType || '').toLowerCase();
-  // Допустимые типы: post, comment, photo, video, note, photo_comment, video_comment, topic_comment, market, market_comment, sitepage
+  // Допустимые: post, comment, photo, video, note, photo_comment, video_comment, topic_comment, market, market_comment, sitepage
   switch (t) {
     case 'post':
     case 'comment':
@@ -94,7 +94,6 @@ function toLikesApiType(objectType) {
     case 'market_comment':
     case 'sitepage':
       return t;
-    // часто приходят as-is — остальные считаем неподдерживаемыми
     default:
       return null;
   }
@@ -103,17 +102,16 @@ function toLikesApiType(objectType) {
 /** Безопасно получаем текущее количество лайков через VK API (service key) */
 async function tryGetLikesCount(ownerId, objectId, objectType) {
   const type = toLikesApiType(objectType);
-  if (!type) return null; // для неподдерживаемых типов не запрашиваем
+  if (!type) return null;      // для неподдерживаемых типов не запрашиваем
   if (!VK_SERVICE_KEY) return null;
 
-  // likes.getList — быстрый способ получить count
   const params = {
     access_token: VK_SERVICE_KEY,
     v: '5.199',
     type,
     owner_id: ownerId,
     item_id: objectId,
-    count: 0 // нам нужен только count
+    count: 0 // нужен только count
   };
 
   try {
@@ -127,11 +125,28 @@ async function tryGetLikesCount(ownerId, objectId, objectType) {
   return null;
 }
 
-/** Короткий помощник для уведомлений */
+/** Уведомление в основной чат */
 async function notifyMAIN(html) {
   const MAIN = getMainChat();
   if (!MAIN || !html) return;
   await sendTelegramMessageWithRetry(MAIN, html, { parse_mode: 'HTML' });
+}
+
+/** Форматирование длительности видео (секунды → H:MM:SS/MM:SS) */
+function formatDuration(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}` : `${m}:${String(r).padStart(2,'0')}`;
+}
+
+/** (опционально) выбор лучшего превью для видео */
+function pickBestPreviewUrl(v) {
+  const all = Array.isArray(v.image) ? v.image : [];
+  if (!all.length) return null;
+  const best = [...all].sort((a,b) => (b.width||0) - (a.width||0))[0];
+  return best?.url || null;
 }
 
 /** Основной обработчик */
@@ -153,7 +168,7 @@ async function handleVkEvent({ type, object }) {
 
     case 'message_reply': {
       const r = object;
-      // твой проект фильтрует некоторые служебные ответы — оставь как было, либо убери строку ниже
+      // если у тебя было исключение по служебным ответам — оставь/верни здесь
       if (r?.text?.includes('Новая заявка по форме')) break;
       const user = await getVkUserName(r.from_id);
       msg = `↩️ <b>Ответ в сообщениях:</b>\n<b>От:</b> <a href="https://vk.com/id${r.from_id}">${user}</a>\n` +
@@ -202,7 +217,7 @@ async function handleVkEvent({ type, object }) {
         total = await tryGetLikesCount(ownerId, ev.object_id, ev.object_type);
       } catch {}
 
-      msg  = `<b>${type === 'like_add' ? '❤️' : '💔'}</b>\n`;
+      msg  = `<b>${type === 'like_add' ? '❤️ Новый лайк в VK' : '💔 Лайк удалён в VK'}</b>\n`;
       msg += `<b>От:</b> <a href="https://vk.com/id${ev.liker_id}">${liker}</a>\n`;
       msg += `<b>${type === 'like_add' ? 'К' : 'С'}:</b> `;
 
@@ -218,7 +233,7 @@ async function handleVkEvent({ type, object }) {
       break;
     }
 
-    // ---------------- Стена ----------------
+    // ---------------- Стена: посты и комментарии ----------------
     case 'wall_post_new': {
       const p = object;
       const author = await getVkUserName(p.from_id || p.owner_id);
@@ -226,6 +241,46 @@ async function handleVkEvent({ type, object }) {
       msg = `🧱 <b>Новый пост на стене</b>\n<b>Автор:</b> <a href="https://vk.com/id${p.from_id || p.owner_id}">${author}</a>\n` +
             `<a href="${link}">Открыть пост</a>`;
       if (p.text) msg += `\n<i>${escapeHtml(p.text.slice(0, 700))}</i>`;
+      break;
+    }
+
+    case 'wall_reply_new': {
+      const c = object; // см. пример payload
+      const author = await getVkUserName(c.from_id).catch(() => `id${c.from_id}`);
+      const ownerAbs = String(c.owner_id).replace(/^-/, '');
+      const link = `https://vk.com/wall-${ownerAbs}_${c.post_id}?reply=${c.id}`;
+      const text = c.text ? `<i>${escapeHtml(c.text)}</i>` : '<i>(без текста)</i>';
+      msg =
+        `💬 <b>Новый комментарий на стене</b>\n` +
+        `<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n` +
+        `<b>К посту:</b> <a href="${link}">открыть</a>\n` +
+        `${text}`;
+      break;
+    }
+
+    // (необязательно, но полезно)
+    case 'wall_reply_edit': {
+      const c = object;
+      const author = await getVkUserName(c.from_id).catch(() => `id${c.from_id}`);
+      const ownerAbs = String(c.owner_id).replace(/^-/, '');
+      const link = `https://vk.com/wall-${ownerAbs}_${c.post_id}?reply=${c.id}`;
+      const text = c.text ? `<i>${escapeHtml(c.text)}</i>` : '<i>(без текста)</i>';
+      msg =
+        `✏️ <b>Комментарий отредактирован</b>\n` +
+        `<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n` +
+        `<b>К посту:</b> <a href="${link}">открыть</a>\n` +
+        `${text}`;
+      break;
+    }
+
+    case 'wall_reply_delete': {
+      const c = object;
+      const ownerAbs = String(c.owner_id).replace(/^-/, '');
+      const link = `https://vk.com/wall-${ownerAbs}_${c.post_id}`;
+      msg =
+        `🗑️ <b>Комментарий удалён</b>\n` +
+        `<b>К посту:</b> <a href="${link}">открыть</a>\n` +
+        `<code>id=${c.comment_id}</code>`;
       break;
     }
 
@@ -237,10 +292,10 @@ async function handleVkEvent({ type, object }) {
       const kindLabel = ({
         approved: 'заявка одобрена',
         request: 'подан запрос на вступление',
-        accepted: '➕',
+        accepted: 'вступил(а)',
         joined: 'вступил(а)'
       })[kind] || 'вступил(а)';
-      msg = `✅ <b>${escapeHtml(kindLabel)} </b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>`;
+      msg = `🟢 <b>${escapeHtml(kindLabel)} в сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>`;
       break;
     }
 
@@ -249,13 +304,13 @@ async function handleVkEvent({ type, object }) {
       const user = await getVkUserName(ev.user_id);
       const admin = ev.admin_id ? await getVkUserName(ev.admin_id) : null;
       const by = ev.self ? 'самостоятельно' : (admin ? `модератором <a href="https://vk.com/id${ev.admin_id}">${admin}</a>` : '—');
-      msg = `❌ <b></b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
-      // в некоторых проектах выходы шлют в отдельный чат лидов — если нужно, раскомментируй:
-      if (LEAD_CHAT_ID) { await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' }); msg = ''; }
+      msg = `🔴 <b>Покинул(а) сообщество</b>\n<a href="https://vk.com/id${ev.user_id}">${user}</a>\n<b>Причина:</b> ${escapeHtml(by)}`;
+      // если у тебя уходы идут в отдельный чат — раскомментируй:
+      // if (LEAD_CHAT_ID) { await sendTelegramMessageWithRetry(LEAD_CHAT_ID, msg, { parse_mode: 'HTML' }); msg = ''; }
       break;
     }
 
-    // ---------------- Комментарии ----------------
+    // ---------------- Комментарии к медиа/товарам/обсуждениям ----------------
     case 'photo_comment_new': {
       const c = object;
       const author = await getVkUserName(c.from_id);
@@ -278,6 +333,41 @@ async function handleVkEvent({ type, object }) {
       const c = object;
       const author = await getVkUserName(c.from_id);
       msg = `🗂️ <b>Комментарий в обсуждении</b>\n<b>Автор:</b> <a href="https://vk.com/id${c.from_id}">${author}</a>\n<b>Текст:</b> <i>${escapeHtml(c.text || '')}</i>`;
+      break;
+    }
+
+    // ---------------- Новое видео ----------------
+    case 'video_new': {
+      const v = object;
+      const ownerAbs = String(v.owner_id || '').replace(/^-/, '');
+      const link = `https://vk.com/video-${ownerAbs}_${v.id}`;
+
+      // автор видео (часто приходит user_id)
+      const authorId = v.user_id || v.owner_id;
+      const author = await getVkUserName(authorId).catch(() => `id${authorId}`);
+
+      const title = v.title ? escapeHtml(v.title) : 'Видео';
+      const desc = v.description ? `<i>${escapeHtml(v.description).slice(0, 600)}</i>` : '<i>(без описания)</i>';
+      const dur  = (typeof v.duration === 'number') ? formatDuration(v.duration) : null;
+
+      let lines = [
+        '🎬 <b>Новое видео</b>',
+        `<b>Автор:</b> <a href="https://vk.com/id${authorId}">${author}</a>`,
+        `<b>Название:</b> ${title}`,
+        `<b>Ссылка:</b> <a href="${link}">открыть</a>`
+      ];
+      if (dur) lines.splice(3, 0, `<b>Длительность:</b> ${dur}`);
+      lines.push(desc);
+      msg = lines.join('\n');
+
+      // (опционально) отправлять превью-картинкой:
+      // const preview = pickBestPreviewUrl(v);
+      // if (preview) {
+      //   await sendTelegramMessageWithRetry(getMainChat(), `<a href="${link}">&#8205;</a>`, { parse_mode: 'HTML' }); // «невидимая» ссылка на родной объект
+      //   await sendTelegramPhotoWithRetry(getMainChat(), preview, { caption: msg, parse_mode: 'HTML' });
+      //   msg = '';
+      // }
+
       break;
     }
 
