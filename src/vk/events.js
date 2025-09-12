@@ -339,9 +339,9 @@ async function handleVkEvent({ type, object }) {
       const kind = String(ev.join_type || '').toLowerCase();
       msg = `🟢 ${u} вступил(а)`;
       // дубль в лид-чат для "новых заявок"
-      //if (kind === 'request') {
-       // await notifyLEAD(`🟢 ${u} запросил(а) вступление в <a href="${groupLink()}">сообщество</a>`);
-      }
+      ///if (kind === 'request') {
+      /// await notifyLEAD(`🟢 ${u} запросил(а) вступление в <a href="${groupLink()}">сообщество</a>`);
+      ///}
       break;
     }
     case 'group_leave': {
