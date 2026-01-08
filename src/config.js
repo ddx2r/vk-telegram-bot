@@ -1,5 +1,8 @@
 // src/config.js — переменные окружения и валидация
 
+const fs = require('fs');
+const path = require('path');
+
 const required = (name) => {
   const v = process.env[name];
   if (!v) {
@@ -7,6 +10,18 @@ const required = (name) => {
     process.exit(1);
   }
   return v;
+};
+
+const readPackageVersion = () => {
+  try {
+    const packagePath = path.join(__dirname, '..', 'package.json');
+    const raw = fs.readFileSync(packagePath, 'utf-8');
+    const data = JSON.parse(raw);
+    return typeof data.version === 'string' ? data.version : null;
+  } catch (err) {
+    console.warn('Не удалось прочитать версию из package.json:', err.message);
+    return null;
+  }
 };
 
 const VK_GROUP_ID        = required('VK_GROUP_ID');
@@ -19,7 +34,7 @@ const LEAD_CHAT_ID   = process.env.LEAD_CHAT_ID || null;
 const DEBUG_CHAT_ID  = process.env.DEBUG_CHAT_ID || null;
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-const BOT_VERSION    = process.env.BOT_VERSION || '2.0.0';
+const BOT_VERSION    = process.env.BOT_VERSION || readPackageVersion() || '2.0.0';
 
 module.exports = {
   VK_GROUP_ID,
