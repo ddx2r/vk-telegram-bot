@@ -29,4 +29,4 @@ function rememberEvent(ctx) {
   cache.set(key, true);
 }
 
-module.exports = { shouldProcessEvent, rememberEvent };
+module.exports = { buildKey, shouldProcessEvent, rememberEvent };
