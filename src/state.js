@@ -80,7 +80,6 @@ function setMainChat(id) {
   state.CURRENT_MAIN_CHAT_ID = String(id);
 }
 
-module.exports = { state, isAdmin, setMainChat };
 // Возвращает true для всех событий, КРОМЕ явно отключённых (=== false)
 function shouldDeliver(type) {
   try {
@@ -92,4 +91,9 @@ function shouldDeliver(type) {
   }
 }
 
-module.exports = { state, shouldDeliver };
+module.exports = {
+  state,
+  shouldDeliver,
+  isAdmin,
+  setMainChat
+};
