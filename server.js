@@ -78,13 +78,17 @@ app.listen(PORT, async () => {
 console.log(`[${new Date().toISOString()}] Сервер на порту ${PORT}`);
   // стартовое сообщение в DEBUG
   if (DEBUG_CHAT_ID) {
+    const communityUrl = `https://vk.com/public${VK_GROUP_ID}`;
+    const mainChatId = String(TELEGRAM_CHAT_ID);
+    const mainChatPublicId = mainChatId.startsWith('-100') ? mainChatId.slice(4) : mainChatId.replace('-', '');
+    const mainChatUrl = `https://t.me/c/${mainChatPublicId}`;
     const lines = [
       '🟢 Система запущена!',
-      `Сообщество: https://vk.com/public${VK_GROUP_ID}`,
+      `Сообщество: <a href="${communityUrl}">${communityUrl}</a>`,
       `Версия: ${BOT_VERSION}`,
-      `Время: ${new Date().toLocaleString('ru-RU')}`,
-      `Основной чат: ${TELEGRAM_CHAT_ID}`
+      `Время (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
+      `Основной чат: <a href="${mainChatUrl}">${mainChatUrl}</a>`
     ];
-    await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'));
+    await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
   }
 });
