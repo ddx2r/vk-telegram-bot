@@ -30,7 +30,7 @@ module.exports = async ({ type, object, group_id }, { getVkUserName, getObjectTy
       console.error(`[${new Date().toISOString()}] Ошибка при получении количества лайков:`, error.message);
       likesCountText = ' (⚠️ Ошибка получения лайков)';
     }
-    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}</b>\n`;
+    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удалён в VK'}</b>\n`;
     telegramMessage += `<b>От:</b> <a href="https://vk.com/id${likeObject.liker_id}">${likerDisplay}</a>\n`;
     telegramMessage += `<b>${isAdd ? 'К' : 'С'}:</b> `;
     if (objectLink) {
@@ -41,7 +41,7 @@ module.exports = async ({ type, object, group_id }, { getVkUserName, getObjectTy
     telegramMessage += likesCountText;
   } else {
     console.warn(`[${new Date().toISOString()}] Получено событие '${type}' без необходимых полей:`, likeObject);
-    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удален в VK'}:</b> (некорректный объект)`;
+    telegramMessage = `<b>${isAdd ? '❤️ Новый лайк в VK' : '💔 Лайк удалён в VK'}:</b> (некорректный объект)`;
   }
   return { message: telegramMessage, parseMode: 'HTML' };
 };
