@@ -1,0 +1,5 @@
+{
+  "name": "vk-telegram-bot-worker",
+  "compatibility_date": "2026-01-08",
+  "main": "src/worker.js"
+}
