@@ -1,5 +1,5 @@
 {
-  "name": "vk-telegram-bot-worker",
+  "name": "vk-shmel",
   "compatibility_date": "2026-01-08",
   "main": "src/worker.js"
 }
