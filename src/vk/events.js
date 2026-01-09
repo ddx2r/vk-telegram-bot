@@ -1,12 +1,12 @@
 // src/vk/events.js — лаконичные уведомления VK Callback API (HTML + ссылки + счётчики лайков)
 
 const axios = require('axios');
-const { state, shouldDeliver } = require('../state'); // may be undefined — см. allowDeliver()
+const { state, shouldDeliver } = require('../state'); // может быть undefined — см. allowDeliver()
 const { sendTelegramMessageWithRetry } = require('../telegram');
 const { escapeHtml, getVkUserName } = require('../utils');
 const { VK_GROUP_ID, VK_SERVICE_KEY, LEAD_CHAT_ID } = require('../config');
 
-/* ================== helpers ================== */
+/* ================== вспомогательные функции ================== */
 
 function allowDeliver(type) {
   if (typeof shouldDeliver === 'function') return !!shouldDeliver(type);
@@ -141,7 +141,7 @@ function groupLink() {
   return `https://vk.com/public${id}`;
 }
 
-/* ================== handler ================== */
+/* ================== обработчик ================== */
 
 async function handleVkEvent({ type, object }) {
   if (!allowDeliver(type)) return;

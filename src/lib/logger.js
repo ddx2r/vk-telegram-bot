@@ -1,6 +1,6 @@
 
 // src/lib/logger.js (CommonJS)
-// Structured logger that writes batched records to Supabase (free-tier friendly)
+// Структурированный логгер, который пишет пакетные записи в Supabase (дружелюбно к бесплатному тарифу)
 const { supabase } = require('./db');
 const { randomUUID } = require('crypto');
 
@@ -34,12 +34,12 @@ class SupabaseLogger {
       this.queue.shift();
       if (!this.dropping) {
         this.dropping = true;
-        console.warn('[logger] Queue overflow, dropping oldest records');
+        console.warn('[logger] Переполнение очереди, отбрасываем самые старые записи');
       }
     }
     this.queue.push(rec);
     if (this.queue.length >= this.BATCH_MAX) {
-      // fire-and-forget
+      // не ждём завершения
       this.flush().catch(() => {});
     }
     this.startTimer();
@@ -68,11 +68,11 @@ class SupabaseLogger {
           error: r.error || null,
         })));
       if (error) {
-        console.error('[logger] Supabase insert error:', error.message);
+        console.error('[logger] Ошибка вставки в Supabase:', error.message);
         for (const rec of batch) console.log('[log-fallback]', JSON.stringify(rec));
       }
     } catch (e) {
-      console.error('[logger] flush exception:', e && e.message ? e.message : e);
+      console.error('[logger] Исключение при flush:', e && e.message ? e.message : e);
       for (const rec of batch) console.log('[log-fallback]', JSON.stringify(rec));
     }
   }
@@ -86,7 +86,7 @@ class SupabaseLogger {
 
 const logger = new SupabaseLogger();
 
-// Express helpers
+// Хелперы для Express
 function withRequestId () {
   return (req, _res, next) => {
     req.requestId = req.headers['x-request-id'] || randomUUID();
@@ -133,7 +133,7 @@ function logMiddlewareVK () {
   };
 }
 
-// Outgoing + error helpers
+// Хелперы для исходящих сообщений и ошибок
 function logOutgoingMessage (platform, chatId, summary, payload) {
   logger.info({
     source: platform,

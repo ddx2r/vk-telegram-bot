@@ -30,13 +30,13 @@ global.__BOT_STARTED_AT = new Date();
 // Регистрация команд
 registerCommands(bot);
 
-// Health
+// Проверка состояния
 app.get('/health', (req, res) => {
   const up = Math.floor((Date.now() - (global.__BOT_STARTED_AT?.getTime() || Date.now())) / 1000);
   res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString() });
 });
 
-// VK webhook
+// Вебхук VK
 app.post('/webhook', logMiddlewareVK(), async (req, res) => {
   const { type, object, group_id, secret } = req.body || {};
   console.log(`[${new Date().toISOString()}] VK событие: ${type}`);
@@ -44,12 +44,12 @@ app.post('/webhook', logMiddlewareVK(), async (req, res) => {
   // Проверка секрета
   if (secret !== VK_SECRET_KEY) return res.status(403).send('Forbidden');
 
-  // confirmation/шум — быстрый ACK
+  // confirmation/шум — быстрое подтверждение
   if (type === 'confirmation' || type === 'typing_status' || type === 'message_read') {
     return res.send('ok');
   }
 
-  // Быстрый ACK, чтобы VK не ретраил
+  // Быстрое подтверждение, чтобы VK не ретраил
   res.send('ok');
 
   try {

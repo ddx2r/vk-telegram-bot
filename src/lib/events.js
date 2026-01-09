@@ -14,7 +14,7 @@ export async function isDuplicateVkPost(ownerId, postId) {
   const key = `vk:${ownerId}:${postId}`;
   const duplicate = await seenOnce(key);
   if (duplicate) {
-    log.info({ ownerId, postId }, 'Duplicate detected — skip');
+    log.info({ ownerId, postId }, 'Обнаружен дубль — пропуск');
     // логируем факт дубля
     await Promise.allSettled([
       logEventFirestore({ type: 'duplicate_skip', vk_owner_id: ownerId, vk_post_id: postId, status: 'skip' }),
@@ -68,5 +68,5 @@ export async function logError({ ownerId, postId, stage, error }) {
     }),
     incrCounter('errors_total')
   ]);
-  log.error({ ownerId, postId, stage, err: String(error) }, 'Send error');
+  log.error({ ownerId, postId, stage, err: String(error) }, 'Ошибка отправки');
 }
